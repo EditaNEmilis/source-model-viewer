@@ -85,6 +85,11 @@ class Renderer:
         self.driver_progress_axis_value = "y"
         self.proximity_skin = False
 
+        self._animation_clips = []
+        self._current_clip_index = -1
+        self._current_clip_name = ""
+        self._clip_metadata = {}
+
     def initialize(self):
         glClearColor(*self.background_color)
 
@@ -264,7 +269,7 @@ class Renderer:
 
         if self.skeletal_animation is not None:
             self.set_skeletal_frame(self.skinning.frame)
-            
+
     def set_proximity_skin(self, enabled):
         self.proximity_skin = bool(enabled)
         self._rebuild_weights()
@@ -404,7 +409,7 @@ class Renderer:
             "unbound_vertices": unbound,
             "top_bones": top_named,
         }
-            
+
     def skeletal_rig_bone_count(self):
         if self.rig is None:
             return 0
@@ -456,7 +461,7 @@ class Renderer:
 
     def skeletal_current_frame(self):
         return self.skinning.frame
-        
+
     def set_backface_culling(self, enabled):
         self.backface_culling = bool(enabled)
 
@@ -597,6 +602,48 @@ class Renderer:
         self.model_position[0] += right[0] * dx * scale - up[0] * dy * scale
         self.model_position[1] += right[1] * dx * scale - up[1] * dy * scale
         self.model_position[2] += right[2] * dx * scale - up[2] * dy * scale
+
+    def set_animation_clips(self, clips):
+        """Store the list of (name, model) tuples and load the first one."""
+        self._animation_clips = clips if clips else []
+        self._clip_metadata = {name: model.metadata for name, model in clips}
+        self._current_clip_name = ""
+
+        if self._animation_clips:
+            self._current_clip_index = 0
+            self._current_clip_name = self._animation_clips[0][0]
+            self.set_skeletal_animation_model(self._animation_clips[0][1])
+        else:
+            self.clear_skeletal_animation()
+
+    def set_animation_clip(self, index):
+        """Switch to a specific animation clip by index."""
+        if 0 <= index < len(self._animation_clips):
+            name, model = self._animation_clips[index]
+            self._current_clip_index = index
+            self._current_clip_name = name
+            self.set_skeletal_animation_model(model)
+            self.set_skeletal_frame(0.0)
+
+    def clip_names(self):
+        """Return a list of clip names."""
+        return [name for name, _ in self._animation_clips]
+
+    def current_clip_name(self):
+        return self._current_clip_name
+
+    def clip_metadata(self, index):
+        if 0 <= index < len(self._animation_clips):
+            name, _ = self._animation_clips[index]
+            return self._clip_metadata.get(name, {})
+        return {}
+
+    def set_skeletal_progress(self, progress):
+        """Set skeletal animation frame based on 0-1 progress."""
+        count = self.skeletal_frame_count()
+        if count > 0:
+            frame = progress * (count - 1)
+            self.set_skeletal_frame(frame)
 
     def _model_bounds(self):
         if self.model and self.model.has_geometry:
@@ -874,7 +921,7 @@ class Renderer:
         glEnable(GL_COLOR_MATERIAL)
 
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
-        
+
         if self.backface_culling:
             glEnable(GL_CULL_FACE)
         else:

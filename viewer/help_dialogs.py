@@ -89,6 +89,9 @@ def controls_html():
         ("Ctrl + M", "Reset model position"),
         ("Ctrl + Shift + R", "Reset camera and model"),
         ("F1", "Open this dialog"),
+        ("Clip dropdown", "Switch between DMX animation clips"),
+        ("Sequence slider", "Scrub through skeletal animation (SMD or DMX)"),
+        ("Driver checkbox", "Let a driver bone control Intensity and Progress"),
     ]
 
     table = "<table>"
@@ -107,6 +110,8 @@ def controls_html():
         "Turn it off to blend targets as a sequence. "
         "<code>Skel</code> applies skeletal deformation. "
         "<code>Driver</code> lets a driver bone control intensity and progress.</p>"
+        "<p><code>Clip</code> selects a DMX animation clip. "
+        "<code>Sequence</code> scrubs through the current skeletal animation.</p>"
     )
 
     return _page("Viewer Controls", body)
@@ -130,12 +135,17 @@ def animation_html():
         "<p>DMX delta states store offsets from the mesh, so the parser adds them onto "
         "the base positions. A synthetic basis target is inserted so the shapes line up "
         "with the VTA model.</p>"
+        "<p>DMX files can contain multiple animation clips. Use the <code>Clip</code> "
+        "dropdown to select one. The <code>Sequence</code> slider lets you scrub through "
+        "the clip, and the playback speed is controlled by the FPS spin box.</p>"
         "<h2>Driver bone</h2>"
         "<p>A bone such as <code>vertexAnimDriver</code> can drive a vertex animation. "
         "Its X position sets intensity from 0 to 1, and its Y position sets progress "
         "from 0 to 1. If your authoring tool is Z-up, progress may live on Z instead. "
         "The parser picks the axis with the most movement, and the flex info TXT can "
         "override it.</p>"
+        "<p>The <code>Driver</code> checkbox enables this; when active, the "
+        "Intensity and Progress sliders are disabled and the driver bone takes over.</p>"
     )
 
     return _page("Animation Guide", body)
@@ -158,6 +168,9 @@ def formats_html():
         "<p><code>keyvalues2</code> is ASCII and hand-editable. <code>binary</code> "
         "versions 1 to 5 are supported, including string tables, element headers, and "
         "attribute arrays.</p>"
+        "<p>DMX animation lists with multiple clips are fully supported, including "
+        "metadata (duration, frame count, FPS) shown in the clip selector. Corrective "
+        "shape flags are also parsed for future use.</p>"
         "<h2>Binary quirks handled</h2>"
         "<p>Attribute type IDs differ per engine branch. The parser tries several index "
         "sizes, allows a null byte after the header, reads element headers before "

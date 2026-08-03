@@ -84,7 +84,7 @@ class Viewport(QOpenGLWidget):
     def set_skeletal_frame(self, frame):
         self.renderer.set_skeletal_frame(frame)
         self.update()
-        
+
     def skeletal_rig_bone_count(self):
         return self.renderer.skeletal_rig_bone_count()
 
@@ -99,14 +99,14 @@ class Viewport(QOpenGLWidget):
 
     def skeletal_unmapped_names(self):
         return self.renderer.skeletal_unmapped_names()
-        
+
     def set_proximity_skin(self, enabled):
         self.renderer.set_proximity_skin(enabled)
         self.update()
 
     def skeletal_weight_stats(self):
         return self.renderer.skeletal_weight_stats()
-        
+
     def set_backface_culling(self, enabled):
         self.renderer.set_backface_culling(enabled)
         self.update()
@@ -199,6 +199,27 @@ class Viewport(QOpenGLWidget):
     def reset_all(self):
         self.renderer.reset_all()
         self.update()
+
+    def set_animation_clips(self, clips):
+        self.renderer.set_animation_clips(clips)
+        self.update()
+
+    def set_animation_clip(self, index):
+        self.renderer.set_animation_clip(index)
+        self.update()
+
+    def set_skeletal_progress(self, progress):
+        self.renderer.set_skeletal_progress(progress)
+        self.update()
+
+    def clip_metadata(self, index):
+        return self.renderer.clip_metadata(index)
+
+    def clip_names(self):
+        return self.renderer.clip_names()
+
+    def current_clip_name(self):
+        return self.renderer.current_clip_name()
 
     def event(self, event):
         if event.type() == QEvent.Type.ShortcutOverride:

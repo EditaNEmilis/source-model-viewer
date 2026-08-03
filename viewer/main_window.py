@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -97,6 +98,18 @@ class MainWindow(QMainWindow):
         self.frame_label.setMinimumWidth(140)
         self.frame_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
+        self.clip_combo = QComboBox()
+        self.clip_combo.setEnabled(False)
+        self.clip_combo.setToolTip("Select animation clip")
+        self.clip_combo.currentIndexChanged.connect(self.clip_changed)
+
+        self.sequence_slider = QSlider(Qt.Horizontal)
+        self.sequence_slider.setEnabled(False)
+        self.sequence_slider.setRange(0, 1000)
+        self.sequence_slider.setSingleStep(10)
+        self.sequence_slider.setPageStep(100)
+        self.sequence_slider.valueChanged.connect(self.sequence_progress_changed)
+
         controls_layout.addWidget(self.play_button, 0, 0, 2, 1)
 
         controls_layout.addWidget(QLabel("Progress"), 0, 1)
@@ -109,8 +122,12 @@ class MainWindow(QMainWindow):
 
         controls_layout.addWidget(QLabel("Intensity"), 1, 1)
         controls_layout.addWidget(self.intensity_slider, 1, 2)
-
         controls_layout.addWidget(self.frame_label, 1, 3, 1, 4)
+
+        controls_layout.addWidget(QLabel("Clip"), 2, 0)
+        controls_layout.addWidget(self.clip_combo, 2, 1, 1, 2)
+        controls_layout.addWidget(QLabel("Sequence"), 2, 3)
+        controls_layout.addWidget(self.sequence_slider, 2, 4, 1, 3)
 
         controls_layout.setColumnStretch(2, 1)
 
@@ -124,6 +141,8 @@ class MainWindow(QMainWindow):
 
         self._create_actions()
         self._create_menus()
+
+        self._clip_models = []
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self.advance_frame)
@@ -212,13 +231,13 @@ class MainWindow(QMainWindow):
         self.about_action = QAction("&About...", self)
         self.about_action.setStatusTip("About this viewer")
         self.about_action.triggered.connect(self.show_about)
-        
+
         self.culling_action = QAction("Backface Culling", self)
         self.culling_action.setCheckable(True)
         self.culling_action.setChecked(False)
         self.culling_action.setStatusTip("Skip back facing triangles (faster, disable if the model looks hollow)")
         self.culling_action.triggered.connect(self.toggle_culling)
-        
+
         self.proximity_skin_action = QAction("Proximity Skin Fallback", self)
         self.proximity_skin_action.setCheckable(True)
         self.proximity_skin_action.setChecked(False)
@@ -384,10 +403,10 @@ class MainWindow(QMainWindow):
 
             if self.flex_info is not None:
                 self.apply_flex_info(self.flex_info, self.flex_info_override)
-                
+
     def open_dmx_model(self, file_path):
         try:
-            reference_model, animation_model = load_dmx(file_path)
+            reference_model, animation_clips = load_dmx(file_path)
         except Exception as error:
             QMessageBox.critical(
                 self,
@@ -414,12 +433,27 @@ class MainWindow(QMainWindow):
 
             self.statusBar().showMessage(message)
 
-        elif animation_model is not None:
-            self.viewport.set_skeletal_animation_model(animation_model)
+        # Handle animation clips
+        if animation_clips:
+            self._clip_models = animation_clips   # store for later (optional)
+            self.viewport.set_animation_clips(animation_clips)
+            self.clip_combo.clear()
+            for name, model in animation_clips:
+                meta = model.metadata
+                frames = len(model.frames) if model.frames else 0
+                duration = meta.get("duration", 0.0)
+                label = f"{name} ({frames} frames, {duration:.2f}s)"
+                self.clip_combo.addItem(label, name)   # store name as user data
+            if animation_clips:
+                self.clip_combo.setCurrentIndex(0)
+                self.clip_combo.setEnabled(True)
             loaded_something = True
-            self.statusBar().showMessage(
-                f"Loaded DMX animation from {file_path}"
-            )
+            if 'message' not in locals():
+                message = f"Loaded {len(animation_clips)} animation clips from DMX"
+                self.statusBar().showMessage(message)
+            else:
+                message += f" and {len(animation_clips)} animation clips"
+                self.statusBar().showMessage(message)
 
         if not loaded_something:
             QMessageBox.warning(
@@ -429,8 +463,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if animation_model is not None and reference_model is not None and reference_model.has_geometry:
-            self.viewport.set_skeletal_animation_model(animation_model)
+        # If we have both reference and animation, make sure skeletal is set
+        if animation_clips and reference_model is not None and reference_model.has_geometry:
+            # The renderer already has the first clip loaded via set_animation_clips
+            pass
 
         self.stop_playback()
         self.update_animation_ui()
@@ -446,10 +482,10 @@ class MainWindow(QMainWindow):
 
         if not file_path:
             return
-            
+
         if is_dmx_file(file_path):
             try:
-                _, animation_model = load_dmx(file_path)
+                _, animation_clips = load_dmx(file_path)
             except Exception as error:
                 QMessageBox.critical(
                     self,
@@ -458,15 +494,21 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            if animation_model is None:
+            if not animation_clips:
                 QMessageBox.warning(
                     self,
                     "No Sequence Data",
-                    "This DMX file does not contain an animation list.",
+                    "This DMX file does not contain any animation clips.",
                 )
                 return
 
-            self.viewport.set_skeletal_animation_model(animation_model)
+            self.viewport.set_animation_clips(animation_clips)
+            self.clip_combo.clear()
+            for name, _ in animation_clips:
+                self.clip_combo.addItem(name)
+            if animation_clips:
+                self.clip_combo.setCurrentIndex(0)
+                self.clip_combo.setEnabled(True)
 
             self._try_auto_flex_info(file_path)
 
@@ -477,7 +519,7 @@ class MainWindow(QMainWindow):
             self.update_animation_ui()
 
             self.statusBar().showMessage(
-                f"Loaded DMX sequence from {file_path}"
+                f"Loaded {len(animation_clips)} DMX clips from {file_path}"
             )
             return
 
@@ -669,6 +711,11 @@ class MainWindow(QMainWindow):
 
     def clear_sequence(self):
         self.viewport.clear_skeletal_animation()
+        self._clip_models = []
+        self.clip_combo.clear()
+        self.clip_combo.setEnabled(False)
+        self.sequence_slider.setValue(0)
+        self.sequence_slider.setEnabled(False)
 
         self.stop_playback()
         self.update_animation_ui()
@@ -702,10 +749,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Auto match enabled")
         else:
             self.statusBar().showMessage("Auto match disabled")
-            
+
     def toggle_culling(self):
         self.viewport.set_backface_culling(self.culling_action.isChecked())
-        
+
     def toggle_proximity_skin(self):
         enabled = self.proximity_skin_action.isChecked()
 
@@ -851,23 +898,24 @@ class MainWindow(QMainWindow):
 
     def advance_frame(self):
         if self._sequence_playback_active():
-            sequence_count = self.viewport.skeletal_frame_count()
-
-            if sequence_count <= 1:
+            count = self.viewport.skeletal_frame_count()
+            if count <= 1:
                 self.stop_playback()
                 return
-
             current = self.viewport.skeletal_current_frame()
             new_frame = current + 1.0
-
-            if new_frame >= sequence_count:
+            if new_frame >= count:
                 new_frame = 0.0
-
             self.viewport.set_skeletal_frame(new_frame)
+
+            # Update sequence slider
+            progress = new_frame / (count - 1) if count > 1 else 0.0
+            self.sequence_slider.blockSignals(True)
+            self.sequence_slider.setValue(int(progress * 1000))
+            self.sequence_slider.blockSignals(False)
 
             if self.driver_check.isChecked():
                 self.sync_sliders_from_renderer()
-
             self.update_frame_label()
             return
 
@@ -997,6 +1045,21 @@ class MainWindow(QMainWindow):
         self.play_button.setEnabled(play_enabled)
         self.fps_spin.setEnabled(play_enabled)
 
+        # Update clip combo and sequence slider
+        clips = self.viewport.clip_names() if hasattr(self.viewport, 'clip_names') else []
+        if clips:
+            self.clip_combo.setEnabled(True)
+            # Ensure current index matches
+            current_name = self.viewport.current_clip_name() if hasattr(self.viewport, 'current_clip_name') else ""
+            if current_name:
+                idx = self.clip_combo.findText(current_name)
+                if idx >= 0:
+                    self.clip_combo.setCurrentIndex(idx)
+        else:
+            self.clip_combo.setEnabled(False)
+
+        self.sequence_slider.setEnabled(has_sequence)
+
         if vta_count > 0 or has_sequence or has_sequence_source:
             self.update_frame_label()
         elif self.animation_targets:
@@ -1064,6 +1127,18 @@ class MainWindow(QMainWindow):
             self.frame_label.setText(
                 f"Target {index + 1}/{vta_count}  I:{intensity:.2f}"
             )
+
+    def clip_changed(self, index):
+        if index >= 0 and self.viewport:
+            self.viewport.set_animation_clip(index)
+            self.sequence_slider.setValue(0)
+            self.stop_playback()
+            self.update_animation_ui()
+
+    def sequence_progress_changed(self, value):
+        progress = value / 1000.0
+        self.viewport.set_skeletal_progress(progress)
+        self.update_frame_label()
 
     def show_controls(self):
         show_help_dialog(self, "Viewer Controls", controls_html())

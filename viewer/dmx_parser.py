@@ -1031,6 +1031,15 @@ def _to_quaternion(value, default=(0.0, 0.0, 0.0, 1.0)):
 
     return default
 
+def _to_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return default
+
 
 def _get_array(element, name):
     value = _attr(element, name)
@@ -1361,21 +1370,17 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
         for i in range(len(model.vertices))
     }
 
-    targets.append(VertexTarget(time=0, overrides=basis_overrides, name="basis"))
-
     next_time = 1
-
     for mesh_index, mesh in enumerate(document.find_all("DmeMesh")):
         if mesh_index >= len(mesh_vertex_lists):
             continue
-
         smd_indices_for_mesh = mesh_vertex_lists[mesh_index]
-
         for delta_reference in _get_array(mesh, "deltaStates"):
             delta = document.resolve(delta_reference)
-
             if delta is None:
                 continue
+
+            corrected = _to_bool(_attr(delta, "corrected"), False)
 
             delta_positions = _get_vector3_array(delta, "positions")
             delta_pos_indices = _get_int_array(delta, "positionsIndices")
@@ -1383,13 +1388,11 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
             delta_norm_indices = _get_int_array(delta, "normalsIndices")
 
             position_offsets = {}
-
             for j, pool_index in enumerate(delta_pos_indices):
                 if j < len(delta_positions):
                     position_offsets[pool_index] = delta_positions[j]
 
             normal_offsets = {}
-
             for k, pool_index in enumerate(delta_norm_indices):
                 if k < len(delta_normals):
                     normal_offsets[pool_index] = delta_normals[k]
@@ -1401,21 +1404,16 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
 
             for smd_index in smd_indices_for_mesh:
                 offset = position_offsets.get(pos_pool_of[smd_index])
-
                 if offset is None:
                     continue
-
                 base_position = base_positions[smd_index]
-
                 new_position = (
                     base_position[0] + offset[0],
                     base_position[1] + offset[1],
                     base_position[2] + offset[2],
                 )
-
                 new_normal = base_normals[smd_index]
                 normal_offset = normal_offsets.get(norm_pool_of[smd_index])
-
                 if normal_offset is not None:
                     new_normal = _normalize_vector(
                         (
@@ -1424,12 +1422,16 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
                             new_normal[2] + normal_offset[2],
                         )
                     )
-
                 overrides[smd_index] = (new_position, new_normal)
 
             if overrides:
                 name = delta.name or f"delta {next_time}"
-                targets.append(VertexTarget(time=next_time, overrides=overrides, name=name))
+                targets.append(VertexTarget(
+                    time=next_time,
+                    overrides=overrides,
+                    name=name,
+                    corrected=corrected
+                ))
                 next_time += 1
 
     return targets
@@ -1497,48 +1499,52 @@ def _sample_quaternion_track(track, t):
     return quat_slerp(values[low], values[high], amount)
 
 
-def build_animation_model(document, reference_model):
+def build_all_animation_models(document, reference_model):
+    """Return a list of (clip_name, SmdModel) for each animation in the DMX."""
     animation_list = document.find_first("DmeAnimationList")
-
     if animation_list is None:
-        return None
+        return []
 
     clips = []
-
     for clip_reference in _get_array(animation_list, "animations"):
         clip = document.resolve(clip_reference)
-
         if clip is not None:
             clips.append(clip)
 
     if not clips:
-        return None
+        return []
 
-    clip = clips[0]
+    result = []
+    for clip in clips:
+        model = _build_single_animation_model(document, clip, reference_model)
+        if model is not None:
+            name = clip.name or f"Clip {len(result)+1}"
+            result.append((name, model))
 
+    return result
+
+
+def _build_single_animation_model(document, clip, reference_model):
+    """Build one SmdModel from a single clip element."""
     frame_rate = _to_float(_attr(clip, "frameRate"), 30.0)
-
     if frame_rate <= 0.0:
         frame_rate = 30.0
 
     time_frame = document.resolve(_attr(clip, "timeFrame"))
-
     offset = 0.0
     scale = 1.0
     duration = 0.0
-
     if time_frame is not None:
         offset = _to_float(_attr(time_frame, "offset"), 0.0)
         scale = _to_float(_attr(time_frame, "scale"), 1.0)
         duration = _to_float(_attr(time_frame, "duration"), 0.0)
-
     if scale <= 0.0:
         scale = 1.0
 
+    # Use reference_model bones and base transforms if available
     if reference_model is not None and reference_model.bones:
         bones = reference_model.bones
         id_by_name = {bone.name: bone.bone_id for bone in bones}
-
         if reference_model.frames:
             base_transforms = reference_model.frames[0].transforms
         else:
@@ -1555,51 +1561,34 @@ def build_animation_model(document, reference_model):
 
     for channel_reference in _get_array(clip, "channels"):
         channel = document.resolve(channel_reference)
-
         if channel is None:
             continue
-
         target = document.resolve(_attr(channel, "toElement"))
-
         if target is None:
             continue
-
         bone_name = target.name
-
         if bone_name not in id_by_name:
             continue
-
         attribute_name = _to_string(_attr(channel, "toAttribute"), "")
-
         log = document.resolve(_attr(channel, "log"))
-
         if log is None:
             continue
-
         layers = _get_array(log, "layers")
-
         if layers:
             layer = document.resolve(layers[0])
         else:
             layer = log
-
         if layer is None:
             continue
-
         times = _get_time_array(layer, "times")
-
         if not times:
             continue
-
         if attribute_name == "position":
             values = _get_vector3_array(layer, "values")
-
             if len(values) == len(times):
                 position_tracks[bone_name] = (times, values)
-
         elif attribute_name in ("orientation", "rotation"):
             values = _get_quaternion_array(layer, "values")
-
             if len(values) == len(times):
                 rotation_tracks[bone_name] = (times, values)
 
@@ -1607,11 +1596,9 @@ def build_animation_model(document, reference_model):
         return None
 
     max_time = 0.0
-
     for times, _ in list(position_tracks.values()) + list(rotation_tracks.values()):
         if times:
             max_time = max(max_time, times[-1])
-
     if duration > 0.0:
         if max_time > 0.0:
             max_time = min(max_time, duration)
@@ -1623,40 +1610,40 @@ def build_animation_model(document, reference_model):
     frame_count = max(frame_count, 1)
 
     frames = []
-
     for frame_index in range(frame_count):
         t = offset + frame_index / effective_rate
         transforms = {}
-
         for bone_name in set(position_tracks) | set(rotation_tracks):
             bone_id = id_by_name[bone_name]
-
             base = base_transforms.get(bone_id, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
             base_position, base_euler = base
-
             position = _sample_vector_track(position_tracks.get(bone_name), t)
-
             if position is None:
                 position = base_position
-
             orientation = _sample_quaternion_track(rotation_tracks.get(bone_name), t)
-
             if orientation is None:
                 euler = base_euler
             else:
                 euler = quat_to_euler(orientation)
-
             transforms[bone_id] = (position, euler)
-
         frames.append(SmdFrame(time=frame_index, transforms=transforms))
 
-    return SmdModel(version=1, bones=list(bones), frames=frames)
+    model = SmdModel(version=1, bones=list(bones), frames=frames)
+    model.metadata = {
+    "frame_rate": frame_rate,
+    "offset": offset,
+    "scale": scale,
+    "duration": duration,
+    "name": clip.name or "",
+    }
+
+    return model
 
 
 def load_dmx(path: str):
     document = parse_dmx(path)
 
     reference_model = build_reference_model(document)
-    animation_model = build_animation_model(document, reference_model)
+    animation_models = build_all_animation_models(document, reference_model)
 
-    return reference_model, animation_model
+    return reference_model, animation_models
