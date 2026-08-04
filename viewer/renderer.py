@@ -179,7 +179,7 @@ class Renderer:
             self.rig = SkeletonRig(model.bones, reference_transforms)
             vertex_weights = self._build_vertex_weights(model)
 
-        self.skinning.set_rig(self.rig, vertex_weights)
+            self.skinning.set_rig(self.rig, vertex_weights)
 
         self.rebuild_animation_frames()
         self._rebuild_skeletal()
@@ -650,30 +650,6 @@ class Renderer:
             return (self.model.min_bound, self.model.max_bound)
 
         return None
-
-    def _build_vertex_weights(self, model):
-        weights = []
-
-        for vertex in model.vertices:
-            vertex_weights = []
-
-            if vertex.links:
-                total = 0.0
-
-                for bone_id, weight in vertex.links:
-                    vertex_weights.append((bone_id, weight))
-                    total += weight
-
-                remaining = 1.0 - total
-
-                if remaining > 0.000001:
-                    vertex_weights.append((vertex.parent_bone, remaining))
-            else:
-                vertex_weights.append((vertex.parent_bone, 1.0))
-
-            weights.append(vertex_weights)
-
-        return weights
 
     def _build_colors(self):
         vertex_count = len(self.model.vertices)
