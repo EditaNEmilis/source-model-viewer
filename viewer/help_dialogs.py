@@ -85,6 +85,7 @@ def controls_html():
         ("Ctrl + Left drag", "Move model"),
         ("M", "Toggle model move mode, then Left drag"),
         ("Ctrl + O", "Open model"),
+        ("Ctrl + Shift + M", "Set materials folder for VTF textures"),
         ("Ctrl + R", "Reset camera"),
         ("Ctrl + M", "Reset model position"),
         ("Ctrl + Shift + R", "Reset camera and model"),
@@ -96,7 +97,9 @@ def controls_html():
 
     table = "<table>"
     for key, action in rows:
-        table += "<tr><td class='k'>" + key + "</td><td>" + action + "</td></tr>"
+        table += (
+            "<tr><td class=\"k\">" + key + "</td><td>" + action + "</td></tr>"
+        )
     table += "</table>"
 
     body = (
@@ -112,6 +115,11 @@ def controls_html():
         "<code>Driver</code> lets a driver bone control intensity and progress.</p>"
         "<p><code>Clip</code> selects a DMX animation clip. "
         "<code>Sequence</code> scrubs through the current skeletal animation.</p>"
+        "<h2>Textures</h2>"
+        "<p>Use <code>File &gt; Set Materials Folder...</code> to point the viewer at an "
+        "extracted <code>materials/</code> directory. Each material on the model is then "
+        "matched to a <code>.vtf</code> file and textured. Materials without a matching "
+        "texture keep their flat placeholder color.</p>"
     )
 
     return _page("Viewer Controls", body)
@@ -171,6 +179,17 @@ def formats_html():
         "<p>DMX animation lists with multiple clips are fully supported, including "
         "metadata (duration, frame count, FPS) shown in the clip selector. Corrective "
         "shape flags are also parsed for future use.</p>"
+        "<h2>VTF</h2>"
+        "<p>Valve Texture Format, versions 7.0 to 7.5. Set a materials folder with "
+        "<code>File &gt; Set Materials Folder...</code> and the viewer resolves each "
+        "model material to a <code>.vtf</code> file, searching subfolders when the "
+        "material name carries no path.</p>"
+        "<p>Decoded formats: DXT1, DXT3, DXT5, BGRA8888, BGRX8888, BGR888, RGB888, "
+        "BGR565, RGB565, BGRA4444, BGRA5551, RGBA8888, ABGR8888, ARGB8888, I8, IA88, "
+        "A8, and UV88. The largest mipmap is used, with trilinear filtering.</p>"
+        "<p>Materials with no matching or decodable texture fall back to a flat "
+        "per-material color, so a model always renders even with a partial materials "
+        "folder.</p>"
         "<h2>Binary quirks handled</h2>"
         "<p>Attribute type IDs differ per engine branch. The parser tries several index "
         "sizes, allows a null byte after the header, reads element headers before "
@@ -183,16 +202,20 @@ def formats_html():
 
 def about_html():
     body = (
-        "<p style='color:#9aa0ae'>Version " + __version__ + "</p>"
+        "<h2>Version " + __version__ + "</h2>"
         "<h2>What it reads</h2>"
         "<p>SMD reference meshes, SMD skeletal sequences, VTA vertex animation, DMX "
-        "models in KeyValues2 and binary, DMX shape keys, and DMX animation lists.</p>"
+        "models in KeyValues2 and binary, DMX shape keys, DMX animation lists, and "
+        "VTF textures from a user-supplied materials folder.</p>"
         "<h2>Built with</h2>"
         "<p>PySide6, PyOpenGL, and numpy.</p>"
         "<h2>Notes</h2>"
         "<p>Binary DMX layouts differ between engine branches. The parser auto-detects "
         "string tables, element headers, and array type ranges, and reports the best "
         "attempt if a file cannot be read.</p>"
+        "<p>VTF texture support decodes DXT1, DXT3, DXT5, and the common uncompressed "
+        "formats. Textures are matched to materials by name against the materials "
+        "folder, with a recursive search for bare material names.</p>"
     )
 
     return _page("Source Model Viewer", body)

@@ -2,6 +2,32 @@
 
 Changelog of each versions.
 
+## [0.5.0] | VTF Support
+
+### Added
+- VTF (Valve Texture Format) texture loading from a user-selected materials directory.
+- Supports DXT1, DXT3, DXT5, BGRA8888, BGRX8888, BGR888, RGB888,
+BGR565, BGRA4444, BGRA5551, RGBA8888, ABGR8888, ARGB8888, I8, IA88,
+A8, and UV88 formats.
+- Per-material texture binding with automatic VTF file resolution
+  (direct path, materials/prefix, and recursive filename search).
+- Proper mipmap generation via `glGenerateMipmap` for trilinear filtering.
+- White vertex color for textured draws to prevent hash-color tinting.
+- Materials folder selector (File > Set Materials Folder, Ctrl+Shift+M).
+
+### Changed
+- MeshBuffers extended with texcoord buffer and per-range drawing
+  for material-batched rendering.
+- Renderer splits draw calls by material group for correct texture binding.
+- UV coordinates passed through the full pipeline from SMD/DMX parsers
+  to the GPU.
+
+### Fixed
+- Texture cache poisoning when materials folder is set after initial render
+  (cache cleared on directory add).
+- VTF format enum alignment with Source SDK *imageformat.h*.
+  (ATI1N/ATI2N corrected to slots 38/37) ([i](https://github.com/ValveSoftware/source-sdk-2013/blob/88fa198fba3fb85d46d4c95018254693fdc3af0a/src/public/bitmap/imageformat.h)).
+
 ## [0.4.0] | DMX, Clips and Metadata
 
 ### [0.4.1]
@@ -53,7 +79,7 @@ Changelog of each versions.
 - Driver bone detection and control (vertexAnimDriver).
 - Auto Match VTA IDs (View menu) to map VTA vertices by position.
 - Skeleton rig and skinning (linear blend skinning with numpy).
-- DMX parser for KeyValues2 and binary (versions 1-5).
+- DMX (Data Model eXchange) parser for KeyValues2 and binary (versions 1-5).
 - DMX mesh loading with shape keys (delta states).
 - DMX animation list (first clip only at this stage).
 - Validate Animation dialog to inspect VTA and skeletal mapping.
@@ -74,7 +100,7 @@ Changelog of each versions.
 ## [0.2.0] | A fine prototype
 
 ### Added
-- SMD parsing of nodes, skeleton, triangles, and vertexanimation blocks.
+- SMD (StudioModel Data) parsing of nodes, skeleton, triangles, and vertexanimation blocks.
 - Triangle rendering with per-material colours (CRC32 hash to HSV).
 - Camera with orbit (left drag), pan (middle drag), and zoom (wheel/right drag).
 - Grid with coloured axes.

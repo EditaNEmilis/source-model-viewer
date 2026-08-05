@@ -246,11 +246,20 @@ class MainWindow(QMainWindow):
         )
         self.proximity_skin_action.triggered.connect(self.toggle_proximity_skin)
 
+        self.materials_folder_action = QAction("Set &Materials Folder...", self)
+        self.materials_folder_action.setShortcut("Ctrl+Shift+M")
+        self.materials_folder_action.setStatusTip(
+            "Add a folder to search for VTF textures"
+        )
+        self.materials_folder_action.triggered.connect(self.set_materials_folder)
+
     def _create_menus(self):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_sequence_action)
         file_menu.addAction(self.open_flex_info_action)
+        file_menu.addAction(self.materials_folder_action)
+        file_menu.addSeparator()
         file_menu.addSeparator()
         file_menu.addAction(self.clear_animation_action)
         file_menu.addAction(self.clear_sequence_action)
@@ -610,6 +619,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Loaded flex info from {file_path}. Load a VTA or model to apply it."
             )
+
+    def set_materials_folder(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Materials Directory",
+            "",
+        )
+        if dir_path:
+            self.viewport.renderer.add_material_directory(dir_path)
+            self.viewport.update()
+            self.statusBar().showMessage(f"Materials folder: {dir_path}")
 
     def _try_auto_flex_info(self, file_path):
         base_path = os.path.splitext(file_path)[0]
