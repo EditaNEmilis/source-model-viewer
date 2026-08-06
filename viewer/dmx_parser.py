@@ -1209,6 +1209,8 @@ def build_reference_model(document):
         uv_indices = _get_int_array(vertex_data, "textureCoordinatesIndices")
 
         flip_v = _to_int(_attr(vertex_data, "flipVCoordinates"), 0) != 0
+        if flip_v:
+            any_flip = True
 
         joint_count = _to_int(_attr(vertex_data, "jointCount"), 0)
         joint_weights = _get_float_array(vertex_data, "jointWeights")
@@ -1341,6 +1343,7 @@ def build_reference_model(document):
     model.vertices = vertices
     model.triangles = triangles
     model.materials = materials
+    model.uv_pre_flipped = any_flip
 
     if triangles:
         model.has_geometry = True

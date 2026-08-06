@@ -425,6 +425,7 @@ class MainWindow(QMainWindow):
             return
 
         loaded_something = False
+        message = None
 
         if reference_model is not None and reference_model.has_geometry:
             if reference_model.has_animation:
@@ -457,12 +458,11 @@ class MainWindow(QMainWindow):
                 self.clip_combo.setCurrentIndex(0)
                 self.clip_combo.setEnabled(True)
             loaded_something = True
-            if 'message' not in locals():
+            if message is None:
                 message = f"Loaded {len(animation_clips)} animation clips from DMX"
-                self.statusBar().showMessage(message)
             else:
                 message += f" and {len(animation_clips)} animation clips"
-                self.statusBar().showMessage(message)
+            self.statusBar().showMessage(message)
 
         if not loaded_something:
             QMessageBox.warning(
@@ -1072,7 +1072,9 @@ class MainWindow(QMainWindow):
             # Ensure current index matches
             current_name = self.viewport.current_clip_name() if hasattr(self.viewport, 'current_clip_name') else ""
             if current_name:
-                idx = self.clip_combo.findText(current_name)
+                idx = self.clip_combo.findData(current_name)
+                if idx < 0:
+                    idx = self.clip_combo.findText(current_name)
                 if idx >= 0:
                     self.clip_combo.setCurrentIndex(idx)
         else:

@@ -4,6 +4,29 @@ Changelog of each versions.
 
 ## [0.5.0] | VTF Support
 
+### [0.5.1]
+
+#### Added
+- VMT (Valve Material) fallback. When a material has no .vtf of its own, the viewer reads the
+  matching .vmt and follows its `$basetexture` reference (or `$iris` for Eye shader
+  materials, `$maintexture` as a last resort) to the real texture.
+- New vmt_parser.py module with a small KeyValues tokenizer that skips nested blocks
+  like Proxies and lowercases parameter names.
+
+#### Fixed
+- Out-of-range triangle indices could reach the GL index buffer on the textured draw
+  path. `_build_material_batches` now validates indices the same way `_build_indices` does.
+- DMX models with flipVCoordinates set had their V coordinate flipped twice. The model
+  now carries a `uv_pre_flipped` flag and the renderer skips its own flip in that case.
+- VTF 7.3+ files with a thumbnail decoded from a shifted offset. The low-res skip now
+  only applies to 7.2 and older, since 7.3+ stores the thumbnail as its own resource
+  and the high-res offset already points past it.
+- Replaced the fragile *locals()* check in `open_dmx_model` with an explicit message
+  variable initialized to *None*.
+- The clip dropdown now syncs with the renderer's current clip by matching user data,
+  so decorated labels like "ref (30 frames, 1.00s)" resolve correctly. `open_sequence`
+  stores the clip name as user data too for consistency.
+
 ### Added
 - VTF (Valve Texture Format) texture loading from a user-selected materials directory.
 - Supports DXT1, DXT3, DXT5, BGRA8888, BGRX8888, BGR888, RGB888,

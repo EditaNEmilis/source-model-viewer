@@ -66,6 +66,7 @@ from viewer.pose import VertexAnimator
 from viewer.skeleton import SkeletonRig, SkeletalAnimation
 from viewer.skinning import Skinning
 from viewer.vtf_parser import parse_vtf, VtfError
+from viewer.vmt_parser import parse_vmt, VmtParseError
 
 
 class Renderer:
@@ -165,7 +166,8 @@ class Renderer:
             texcoords = np.array(
                 [vertex.uv for vertex in model.vertices], dtype=np.float32
             )
-            texcoords[:, 1] = 1.0 - texcoords[:, 1]
+            if not model.uv_pre_flipped:
+                texcoords[:, 1] = 1.0 - texcoords[:, 1]
 
             self.model_center = [
                 (model.min_bound[0] + model.max_bound[0]) * 0.5,
@@ -232,22 +234,22 @@ class Renderer:
                 glDeleteTextures(1, [tex_id])
         self.texture_cache = {}
 
-    def _find_vtf_file(self, material_name):
-        name = material_name.strip().strip("/")
+    def _resolve_path(self, name, ext):
+        name = name.strip().strip("/")
 
         dot = name.rfind(".")
         if dot > 0:
-            ext = name[dot + 1:].lower()
-            if ext in ("vtf", "vmt", "bmp", "tga", "png", "jpg", "jpeg"):
+            existing = name[dot + 1:].lower()
+            if existing in ("vtf", "vmt", "bmp", "tga", "png", "jpg", "jpeg"):
                 name = name[:dot]
 
         name = name.replace("\\", "/")
 
-        candidates = [name + ".vtf"]
+        candidates = [name + ext]
         if name.lower().startswith("materials/"):
-            candidates.append(name[10:] + ".vtf")
+            candidates.append(name[10:] + ext)
         else:
-            candidates.append("materials/" + name + ".vtf")
+            candidates.append("materials/" + name + ext)
 
         for search_dir in self.material_dirs:
             for candidate in candidates:
@@ -255,13 +257,36 @@ class Renderer:
                 if os.path.isfile(full_path):
                     return full_path
 
-        # Recursive fallback for bare material names
-        target_filename = os.path.basename(name).lower() + ".vtf"
+        target = os.path.basename(name).lower() + ext
         for search_dir in self.material_dirs:
             for root, dirs, files in os.walk(search_dir):
                 for f in files:
-                    if f.lower() == target_filename:
+                    if f.lower() == target:
                         return os.path.join(root, f)
+
+        return None
+
+    def _find_vtf_file(self, material_name):
+        path = self._resolve_path(material_name, ".vtf")
+        if path:
+            return path
+
+        # No direct VTF. Try the VMT and follow its texture reference.
+        vmt_path = self._resolve_path(material_name, ".vmt")
+        if vmt_path is None:
+            return None
+
+        try:
+            shader, params = parse_vmt(vmt_path)
+        except (VmtParseError, OSError):
+            return None
+
+        for key in ("$basetexture", "$iris", "$maintexture"):
+            base = params.get(key)
+            if base:
+                resolved = self._resolve_path(base, ".vtf")
+                if resolved:
+                    return resolved
 
         return None
 
@@ -306,14 +331,22 @@ class Renderer:
         if self.model is None or not self.model.triangles:
             return None
 
+        vertex_count = len(self.model.vertices)
         batches = {}
         batch_order = []
         for triangle in self.model.triangles:
+            a, b, c = triangle.indices
+            if not (
+                0 <= a < vertex_count
+                and 0 <= b < vertex_count
+                and 0 <= c < vertex_count
+            ):
+                continue
             mat = triangle.material
             if mat not in batches:
                 batches[mat] = []
                 batch_order.append(mat)
-            batches[mat].extend(triangle.indices)
+            batches[mat].extend((a, b, c))
 
         all_indices = []
         for mat in batch_order:

@@ -58,6 +58,9 @@ class SmdModel:
     max_bound: Optional[Tuple[float, float, float]] = None
     has_geometry: bool = False
     has_animation: bool = False
+    has_geometry: bool = False
+    has_animation: bool = False
+    uv_pre_flipped: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

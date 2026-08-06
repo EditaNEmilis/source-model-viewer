@@ -270,12 +270,15 @@ def parse_vtf(path: str) -> Tuple[VtfInfo, np.ndarray]:
     # Order: mipmaps smallest->largest, then frames, then faces, then z-slices
     offset = image_data_start
 
-    # Skip low-res thumbnail
-    if info.low_res_format != IMAGE_FORMAT_NONE and info.low_res_width > 0:
-        low_size = _mip_image_size(
-            info.low_res_format, info.low_res_width, info.low_res_height
-        )
-        offset += low_size
+    # 7.2 and older store the thumbnail directly before the mip chain.
+    # 7.3+ keeps it as a separate resource, and the 0x30 resource offset
+    # already points past it, so skipping again would shift the decode.
+    if version_minor < 3:
+        if info.low_res_format != IMAGE_FORMAT_NONE and info.low_res_width > 0:
+            low_size = _mip_image_size(
+                info.low_res_format, info.low_res_width, info.low_res_height
+            )
+            offset += low_size
 
     # Skip all mipmaps except the last (largest)
     for mip in range(info.mipmap_count - 1):
