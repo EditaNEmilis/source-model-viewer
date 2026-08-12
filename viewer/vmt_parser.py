@@ -1,5 +1,6 @@
-from typing import Dict, Tuple
+### Valve Material ###
 
+from typing import Dict, Tuple
 
 class VmtParseError(ValueError):
     pass

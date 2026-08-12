@@ -1,3 +1,5 @@
+### Valve Texture Format ###
+
 import struct
 import numpy as np
 from typing import Optional, Tuple

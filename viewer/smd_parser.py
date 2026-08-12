@@ -1,3 +1,5 @@
+### StudioModel Data ###
+
 import math
 import re
 
@@ -7,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 NODE_PATTERN = re.compile(r'^\s*(-?\d+)\s+"(.*)"\s+(-?\d+)\s*$')
 
+### Dataclasses
 
 @dataclass
 class SmdBone:
@@ -60,6 +63,8 @@ class SmdModel:
     has_animation: bool = False
     uv_pre_flipped: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+###
 
 
 def _read_text_lines(path: str) -> List[str]:
