@@ -2,6 +2,33 @@
 
 Changelog of each versions.
 
+## [0.6.0] | MDL and Preferences
+
+### Added
+- Compiled Source engine model support (`.mdl`).
+- Binary vertex buffer decoder (`.vvd`) supporting LOD 0 vertex reconstruction and fixup tables.
+- Hardware strip and index decoder (`.vtx`) supporting triangle lists (TRILIST) and strips (TRISTRIP) across dx90, dx80, and generic vtx formats.
+- Bone hierarchy and bind pose extraction directly from `mstudiobone_t` binary structures.
+- Automatic material folder detection: scans up from `models/...` paths to automatically mount the game or workshop `materials` directory.
+- Model `cdmaterials` search path resolution for automatic texture locating.
+- Settings dialog (`File > Settings...`, `Ctrl+,`) with persistent storage (`QSettings`).
+- Configurable preferences: Auto-mount materials toggle, default materials folder, background color picker, grid display, default FOV, default FPS, and default backface culling.
+- VMT shader parameter support: `$nocull`, `$no_draw`, `$selfillum`, `$color` / `$color2`, `$translucent`, and `$alphatest`.
+- Eye shader texture resolution: prioritizes `$iris` for character eyes to prevent blank scleras.
+- Skin replacement table translation via `skinreference_index`.
+
+### Changed
+- File open dialog now accepts `.mdl` alongside `.smd`, `.vta`, and `.dmx`.
+- Completely removed runtime recursive filesystem scanning in texture resolution to eliminate loading freezes.
+- Alpha channel masking: textures with Phong specular masks are rendered opaque unless `$translucent` or `$alphatest` is explicitly enabled.
+- Help dialogs updated with MDL pipeline details, Settings documentation, and 0.6.0 version info.
+
+### Fixed
+- Stacking sub-models: bodyparts now pick visible meshes rather than rendering all alternate options on top of each other.
+- VTX `MeshHeader_t` struct stride aligned to 12 bytes to prevent index and material corruption across multi-mesh models.
+- Prevented double `materials/materials/` path nesting when resolving VMT relative texture paths.
+- Background color now applies immediately and persists across application restarts.
+
 ## [0.5.0] | VTF Support
 
 ### [0.5.1]

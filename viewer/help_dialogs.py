@@ -84,8 +84,9 @@ def controls_html():
         ("Shift + drag", "Pan camera"),
         ("Ctrl + Left drag", "Move model"),
         ("M", "Toggle model move mode, then Left drag"),
-        ("Ctrl + O", "Open model"),
-        ("Ctrl + Shift + M", "Set materials folder for VTF textures"),
+        ("Ctrl + O", "Open model (SMD, VTA, DMX, MDL)"),
+        ("Ctrl + ,", "Open Settings dialog"),
+        ("Ctrl + Shift + M", "Set materials folder manually"),
         ("Ctrl + R", "Reset camera"),
         ("Ctrl + M", "Reset model position"),
         ("Ctrl + Shift + R", "Reset camera and model"),
@@ -115,11 +116,10 @@ def controls_html():
         "<code>Driver</code> lets a driver bone control intensity and progress.</p>"
         "<p><code>Clip</code> selects a DMX animation clip. "
         "<code>Sequence</code> scrubs through the current skeletal animation.</p>"
-        "<h2>Textures</h2>"
-        "<p>Use <code>File &gt; Set Materials Folder...</code> to point the viewer at an "
-        "extracted <code>materials/</code> directory. Each material on the model is then "
-        "matched to a <code>.vtf</code> file and textured. Materials without a matching "
-        "texture keep their flat placeholder color.</p>"
+        "<h2>Materials and Textures</h2>"
+        "<p>Compiled MDL models auto-mount their workshop or game materials directory. "
+        "You can also manually set a directory via <code>File &gt; Set Materials Folder...</code> "
+        "or configure default search directories in <code>File &gt; Settings...</code> (Ctrl+,).</p>"
     )
 
     return _page("Viewer Controls", body)
@@ -137,23 +137,18 @@ def animation_html():
         "<h2>VTA notes</h2>"
         "<p>The first target is treated as the basis and should contain every vertex in "
         "its reference position. Later targets are sparse and only list changed vertices. "
-        "Vertex IDs refer to the order of vertices in the reference SMD triangles block, "
-        "so the VTA must match the reference SMD.</p>"
+        "Vertex IDs refer to the order of vertices in the reference SMD triangles block.</p>"
         "<h2>DMX notes</h2>"
         "<p>DMX delta states store offsets from the mesh, so the parser adds them onto "
         "the base positions. A synthetic basis target is inserted so the shapes line up "
         "with the VTA model.</p>"
         "<p>DMX files can contain multiple animation clips. Use the <code>Clip</code> "
         "dropdown to select one. The <code>Sequence</code> slider lets you scrub through "
-        "the clip, and the playback speed is controlled by the FPS spin box.</p>"
+        "the clip.</p>"
         "<h2>Driver bone</h2>"
         "<p>A bone such as <code>vertexAnimDriver</code> can drive a vertex animation. "
         "Its X position sets intensity from 0 to 1, and its Y position sets progress "
-        "from 0 to 1. If your authoring tool is Z-up, progress may live on Z instead. "
-        "The parser picks the axis with the most movement, and the flex info TXT can "
-        "override it.</p>"
-        "<p>The <code>Driver</code> checkbox enables this; when active, the "
-        "Intensity and Progress sliders are disabled and the driver bone takes over.</p>"
+        "from 0 to 1.</p>"
     )
 
     return _page("Animation Guide", body)
@@ -161,44 +156,25 @@ def animation_html():
 
 def formats_html():
     body = (
+        "<h2>MDL / VVD / VTX</h2>"
+        "<p>Compiled Source engine models. The viewer parses the main <code>.mdl</code> header, "
+        "reconstructs LOD 0 vertex pools from <code>.vvd</code> files, and reads optimized "
+        "hardware triangle strips and lists from <code>.vtx</code> files (including dx90, dx80, "
+        "and generic vtx formats). Bones and skin-family tables are loaded directly.</p>"
         "<h2>SMD</h2>"
         "<p>ASCII StudioModel Data. Reference files contain nodes, skeleton, and "
-        "triangles. Animation files contain nodes and skeleton only. X is north. "
-        "Comments use <code>//</code>, <code>#</code>, or <code>;</code> in Source "
-        "studiomdl.</p>"
+        "triangles. Animation files contain nodes and skeleton only.</p>"
         "<h2>VTA</h2>"
         "<p>Vertex animation library. Never has a triangles block and needs a matching "
-        "reference SMD. The skeleton block only needs a <code>time</code> header per "
-        "shape.</p>"
+        "reference SMD.</p>"
         "<h2>DMX</h2>"
-        "<p>Data Model eXchange. Stores the reference mesh, shape keys, and animation "
-        "in one file. Two encodings are supported.</p>"
-        "<p><code>keyvalues2</code> is ASCII and hand-editable. <code>binary</code> "
-        "versions 1 to 5 are supported, including string tables, element headers, and "
-        "attribute arrays.</p>"
-        "<p>DMX animation lists with multiple clips are fully supported, including "
-        "metadata (duration, frame count, FPS) shown in the clip selector. Corrective "
-        "shape flags are also parsed for future use.</p>"
-        "<h2>VTF</h2>"
-        "<p>Valve Texture Format, versions 7.0 to 7.5. Set a materials folder with "
-        "<code>File &gt; Set Materials Folder...</code> and the viewer resolves each "
-        "model material to a <code>.vtf</code> file, searching subfolders when the "
-        "material name carries no path.</p>"
-        "<p>Decoded formats: DXT1, DXT3, DXT5, BGRA8888, BGRX8888, BGR888, RGB888, "
-        "BGR565, RGB565, BGRA4444, BGRA5551, RGBA8888, ABGR8888, ARGB8888, I8, IA88, "
-        "A8, and UV88. The largest mipmap is used, with trilinear filtering.</p>"
-        "<p>Materials with no matching or decodable texture fall back to a flat "
-        "per-material color, so a model always renders even with a partial materials "
-        "folder.</p>"
-        "<h2>VMT</h2>"
-        "<p>When a material has no <code>.vtf</code> of its own, the viewer reads the "
-        "matching <code>.vmt</code> and follows its <code>$basetexture</code> reference "
-        "(or <code>$iris</code> for Eye shader materials) to the real texture.</p>"
-        "<h2>Binary quirks handled</h2>"
-        "<p>Attribute type IDs differ per engine branch. The parser tries several index "
-        "sizes, allows a null byte after the header, reads element headers before "
-        "attribute blocks, and accepts array type ranges starting at 15, 32, 128, or "
-        "224.</p>"
+        "<p>Data Model eXchange. Supports <code>keyvalues2</code> ASCII and <code>binary</code> "
+        "versions 1 through 5, including shape keys and multiple animation clips.</p>"
+        "<h2>VTF & VMT</h2>"
+        "<p>Valve Texture Format (versions 7.0 to 7.5) and Valve Material templates. "
+        "Supported VMT parameters include <code>$basetexture</code>, <code>$iris</code>, "
+        "<code>$nocull</code>, <code>$no_draw</code>, <code>$selfillum</code>, <code>$color</code>, "
+        "<code>$translucent</code>, and <code>$alphatest</code>.</p>"
     )
 
     return _page("Supported Formats", body)
@@ -208,18 +184,11 @@ def about_html():
     body = (
         "<h2>Version " + __version__ + "</h2>"
         "<h2>What it reads</h2>"
-        "<p>SMD reference meshes, SMD skeletal sequences, VTA vertex animation, DMX "
-        "models in KeyValues2 and binary, DMX shape keys, DMX animation lists, and "
-        "VTF textures from a user-supplied materials folder.</p>"
+        "<p>Compiled Source models (.mdl, .vvd, .vtx), SMD reference meshes, SMD skeletal sequences, "
+        "VTA vertex animation, DMX models in KeyValues2 and binary, DMX shape keys, and "
+        "VTF/VMT materials.</p>"
         "<h2>Built with</h2>"
         "<p>PySide6, PyOpenGL, and numpy.</p>"
-        "<h2>Notes</h2>"
-        "<p>Binary DMX layouts differ between engine branches. The parser auto-detects "
-        "string tables, element headers, and array type ranges, and reports the best "
-        "attempt if a file cannot be read.</p>"
-        "<p>VTF texture support decodes DXT1, DXT3, DXT5, and the common uncompressed "
-        "formats. Textures are matched to materials by name against the materials "
-        "folder, with a recursive search for bare material names.</p>"
     )
 
     return _page("Source Model Viewer", body)

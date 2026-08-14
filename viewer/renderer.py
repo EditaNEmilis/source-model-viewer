@@ -3,8 +3,10 @@ import os
 import zlib
 import numpy as np
 from OpenGL.GL import (
+    GL_ALPHA_TEST,
     GL_AMBIENT,
     GL_AMBIENT_AND_DIFFUSE,
+    GL_BLEND,
     GL_CLAMP_TO_EDGE,
     GL_COLOR_BUFFER_BIT,
     GL_COLOR_MATERIAL,
@@ -13,6 +15,7 @@ from OpenGL.GL import (
     GL_DEPTH_TEST,
     GL_DIFFUSE,
     GL_FRONT_AND_BACK,
+    GL_GREATER,
     GL_GENERATE_MIPMAP,
     GL_LIGHT0,
     GL_LIGHTING,
@@ -22,9 +25,11 @@ from OpenGL.GL import (
     GL_MODELVIEW,
     GL_MODULATE,
     GL_NORMALIZE,
+    GL_ONE_MINUS_SRC_ALPHA,
     GL_POSITION,
     GL_PROJECTION,
     GL_RGBA,
+    GL_SRC_ALPHA,
     GL_TEXTURE_2D,
     GL_TEXTURE_ENV,
     GL_TEXTURE_ENV_MODE,
@@ -33,11 +38,14 @@ from OpenGL.GL import (
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_UNSIGNED_BYTE,
+    glAlphaFunc,
     glBegin,
     glBindTexture,
+    glBlendFunc,
     glClear,
     glClearColor,
     glColor3f,
+    glColor4f,
     glColorMaterial,
     glDeleteTextures,
     glDisable,
@@ -74,6 +82,7 @@ class Renderer:
         self.background_color = (0.10, 0.10, 0.11, 1.0)
         self.width = 1
         self.height = 1
+        self.show_grid = True
 
         self.camera = Camera()
         self.animator = VertexAnimator()
@@ -109,7 +118,9 @@ class Renderer:
         self._clip_metadata = {}
 
         self.texture_cache = {}
+        self.material_props = {}
         self.material_dirs = []
+        self.model_material_dirs = []
         self._material_batches = []
 
     def initialize(self):
@@ -141,12 +152,43 @@ class Renderer:
         self._draw_grid()
         self._draw_model()
 
+    def set_background_color(self, r, g, b, a=1.0):
+        self.background_color = (float(r), float(g), float(b), float(a))
+
+    def set_show_grid(self, enabled):
+        self.show_grid = bool(enabled)
+
+    def paint(self):
+        if self.width <= 0 or self.height <= 0:
+            return
+        glClearColor(*self.background_color)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        aspect = self.width / float(self.height)
+        gluPerspective(self.camera.fov, aspect, self.camera.near, self.camera.far)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.4, 1.0, 0.0))
+        self.camera.apply()
+        if self.show_grid:
+            self._draw_grid()
+        self._draw_model()
+
     # ------------------------------------------------------------------
     # Model loading
     # ------------------------------------------------------------------
 
     def set_model(self, model):
         self.model = model
+        self.model_material_dirs = []
+        if model and hasattr(model, "metadata") and "material_dirs" in model.metadata:
+            self.model_material_dirs = [
+                d.replace("\\", "/").strip("/")
+                for d in model.metadata["material_dirs"]
+                if d
+            ]
+
         self.reset_model_transform()
         self._static_positions = None
         self._static_normals = None
@@ -233,78 +275,174 @@ class Renderer:
             if tex_id:
                 glDeleteTextures(1, [tex_id])
         self.texture_cache = {}
+        self.material_props = {}
 
     def _resolve_path(self, name, ext):
-        name = name.strip().strip("/")
+        if not name:
+            return None
 
-        dot = name.rfind(".")
+        # Clean string, strip quotes, normalize slashes
+        clean_name = name.strip().replace("\\", "/").strip('"/')
+
+        dot = clean_name.rfind(".")
         if dot > 0:
-            existing = name[dot + 1:].lower()
+            existing = clean_name[dot + 1:].lower()
             if existing in ("vtf", "vmt", "bmp", "tga", "png", "jpg", "jpeg"):
-                name = name[:dot]
+                clean_name = clean_name[:dot]
 
-        name = name.replace("\\", "/")
+        # Strip materials/ prefix if present
+        if clean_name.lower().startswith("materials/"):
+            clean_name = clean_name[10:]
 
-        candidates = [name + ext]
-        if name.lower().startswith("materials/"):
-            candidates.append(name[10:] + ext)
-        else:
-            candidates.append("materials/" + name + ext)
+        # 1. Build relative candidate list
+        relative_candidates = [
+            clean_name + ext,
+            "materials/" + clean_name + ext,
+        ]
 
+        # Combine with all cdmaterials paths
+        for cddir in self.model_material_dirs:
+            cddir_clean = cddir.strip("/")
+            if cddir_clean:
+                relative_candidates.append(f"{cddir_clean}/{clean_name}" + ext)
+                relative_candidates.append(f"materials/{cddir_clean}/{clean_name}" + ext)
+
+        # 2. Check direct paths across mounted directories
         for search_dir in self.material_dirs:
-            for candidate in candidates:
-                full_path = os.path.join(search_dir, candidate)
+            search_clean = os.path.normpath(search_dir)
+            for candidate in relative_candidates:
+                full_path = os.path.join(search_clean, candidate)
                 if os.path.isfile(full_path):
                     return full_path
 
-        target = os.path.basename(name).lower() + ext
+                # Check inside materials/ subfolder without duplicating prefix
+                if not candidate.lower().startswith("materials/"):
+                    mat_full = os.path.join(search_clean, "materials", candidate)
+                    if os.path.isfile(mat_full):
+                        return mat_full
+
+        # 3. Fast probe in model's specific material folders
+        target_name = os.path.basename(clean_name).lower() + ext
         for search_dir in self.material_dirs:
-            for root, dirs, files in os.walk(search_dir):
-                for f in files:
-                    if f.lower() == target:
-                        return os.path.join(root, f)
+            for cddir in self.model_material_dirs:
+                cddir_clean = cddir.strip("/")
+                test_dirs = [
+                    os.path.join(search_dir, cddir_clean),
+                    os.path.join(search_dir, "materials", cddir_clean),
+                ]
+                for test_dir in test_dirs:
+                    if os.path.isdir(test_dir):
+                        try:
+                            for entry in os.listdir(test_dir):
+                                if entry.lower() == target_name:
+                                    return os.path.join(test_dir, entry)
+                        except OSError:
+                            pass
 
         return None
 
     def _find_vtf_file(self, material_name):
+        # 1. Direct VTF check
         path = self._resolve_path(material_name, ".vtf")
         if path:
             return path
 
-        # No direct VTF. Try the VMT and follow its texture reference.
+        # 2. Check matching VMT
         vmt_path = self._resolve_path(material_name, ".vmt")
         if vmt_path is None:
             return None
 
         try:
             shader, params = parse_vmt(vmt_path)
-        except (VmtParseError, OSError):
+        except Exception:
             return None
 
-        for key in ("$basetexture", "$iris", "$maintexture"):
+        # Check eye iris texture FIRST so pupils/eyes render instead of blank white scleras
+        keys_to_check = [
+            "$iris", "iris",
+            "$basetexture", "basetexture",
+            "$basetexture2", "basetexture2",
+            "$maintexture", "maintexture",
+            "$texture2", "texture2",
+        ]
+
+        for key in keys_to_check:
             base = params.get(key)
             if base:
-                resolved = self._resolve_path(base, ".vtf")
+                clean_base = base.replace("\\", "/").strip('"/').lstrip("/")
+                resolved = self._resolve_path(clean_base, ".vtf")
                 if resolved:
                     return resolved
 
         return None
 
+    def _parse_vmt_color(self, val_str):
+        if not val_str:
+            return (1.0, 1.0, 1.0, 1.0)
+        clean = val_str.strip('"{}[ ]')
+        parts = clean.split()
+        if len(parts) >= 3:
+            try:
+                nums = [float(p) for p in parts[:3]]
+                # If values are in 0-255 range, normalize to 0.0-1.0
+                if any(n > 1.0 for n in nums):
+                    nums = [n / 255.0 for n in nums]
+                return (nums[0], nums[1], nums[2], 1.0)
+            except ValueError:
+                pass
+        return (1.0, 1.0, 1.0, 1.0)
+
     def _load_material_texture(self, material_name):
         if material_name in self.texture_cache:
             return self.texture_cache[material_name]
 
-        vtf_path = self._find_vtf_file(material_name)
+        props = {
+            "nocull": False,
+            "nodraw": False,
+            "selfillum": False,
+            "translucent": False,
+            "alphatest": False,
+            "color": (1.0, 1.0, 1.0, 1.0),
+        }
 
+        vmt_path = self._resolve_path(material_name, ".vmt")
+        if vmt_path and os.path.isfile(vmt_path):
+            try:
+                _, params = parse_vmt(vmt_path)
+                props["nocull"] = params.get("$nocull") in ("1", "true") or params.get("nocull") in ("1", "true")
+                props["nodraw"] = params.get("$no_draw") in ("1", "true") or params.get("no_draw") in ("1", "true")
+                props["selfillum"] = params.get("$selfillum") in ("1", "true") or params.get("selfillum") in ("1", "true")
+                props["translucent"] = params.get("$translucent") in ("1", "true") or params.get("translucent") in ("1", "true")
+                props["alphatest"] = params.get("$alphatest") in ("1", "true") or params.get("alphatest") in ("1", "true")
+
+                color_val = params.get("$color") or params.get("$color2") or params.get("color") or params.get("color2")
+                if color_val:
+                    props["color"] = self._parse_vmt_color(color_val)
+            except Exception:
+                pass
+
+        self.material_props[material_name] = props
+
+        # Check if batch should be skipped entirely
+        if props["nodraw"]:
+            self.texture_cache[material_name] = None
+            return None
+
+        vtf_path = self._find_vtf_file(material_name)
         if vtf_path is None:
             self.texture_cache[material_name] = None
             return None
 
         try:
             info, rgba = parse_vtf(vtf_path)
-        except (VtfError, OSError) as e:
+        except (VtfError, OSError):
             self.texture_cache[material_name] = None
             return None
+
+        # Mask alpha to 255 for opaque materials with phong reflection masks
+        is_transparent = props["translucent"] or props["alphatest"]
+        if not is_transparent and rgba.shape[2] == 4:
+            rgba[:, :, 3] = 255
 
         tex_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, tex_id)
@@ -321,8 +459,8 @@ class Renderer:
         )
 
         glGenerateMipmap(GL_TEXTURE_2D)
-
         glBindTexture(GL_TEXTURE_2D, 0)
+
         self.texture_cache[material_name] = tex_id
         return tex_id
 
@@ -973,6 +1111,12 @@ class Renderer:
         glEnable(GL_COLOR_MATERIAL)
         glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
 
+        # Enable alpha test and blending for eyelashes, hair cards, and decals
+        glEnable(GL_ALPHA_TEST)
+        glAlphaFunc(GL_GREATER, 0.1)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
         if self.backface_culling:
             glEnable(GL_CULL_FACE)
         else:
@@ -991,6 +1135,29 @@ class Renderer:
         if self._material_batches and self.mesh.has_texcoords:
             for mat_name, offset, count in self._material_batches:
                 tex_id = self._load_material_texture(mat_name)
+                props = self.material_props.get(mat_name, {})
+
+                if props.get("nodraw"):
+                    continue
+
+                # Handle $nocull per material
+                if props.get("nocull"):
+                    glDisable(GL_CULL_FACE)
+                elif self.backface_culling:
+                    glEnable(GL_CULL_FACE)
+                else:
+                    glDisable(GL_CULL_FACE)
+
+                # Handle $selfillum (glowing eyes / displays)
+                if props.get("selfillum"):
+                    glDisable(GL_LIGHTING)
+                else:
+                    glEnable(GL_LIGHTING)
+
+                # Apply color tint
+                color = props.get("color", (1.0, 1.0, 1.0, 1.0))
+                glColor4f(*color)
+
                 if tex_id:
                     glEnable(GL_TEXTURE_2D)
                     glBindTexture(GL_TEXTURE_2D, tex_id)
@@ -1000,10 +1167,10 @@ class Renderer:
                     glDisable(GL_TEXTURE_2D)
                 else:
                     self.mesh.draw_range(offset, count, with_texcoords=False, with_colors=True)
-        else:
-            self.mesh.draw(with_texcoords=False)
 
         glPopMatrix()
+        glDisable(GL_ALPHA_TEST)
+        glDisable(GL_BLEND)
         glDisable(GL_LIGHTING)
 
     def _material_color(self, material):

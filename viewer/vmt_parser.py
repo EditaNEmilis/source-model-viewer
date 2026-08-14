@@ -12,7 +12,7 @@ def _tokenize(text: str):
     n = len(text)
     while i < n:
         character = text[i]
-        if character in " \t\r\n":
+        if character in " \t\r\n\ufeff":
             i += 1
             continue
         if character == "/" and i + 1 < n and text[i + 1] == "/":
@@ -54,24 +54,22 @@ def _read_block(tokens, i, out):
         if token == "{":
             i = _read_block(tokens, i + 1, None)
             continue
-        key = token[1]
+        key = token[1] if isinstance(token, tuple) else token
         i += 1
         if i < n and tokens[i] == "{":
-            # Nested section like Proxies, skip its contents
+            # Skip nested blocks like Proxies
             i = _read_block(tokens, i + 1, None)
             continue
         if i < n and isinstance(tokens[i], tuple):
             if out is not None:
-                out[key.lower()] = tokens[i][1]
+                clean_key = key.lower().strip('"').strip()
+                clean_val = tokens[i][1].replace("\\", "/").strip('"').strip()
+                out[clean_key] = clean_val
             i += 1
     return i
 
 
 def parse_vmt(path: str) -> Tuple[str, Dict[str, str]]:
-    """
-    Parse a VMT file. Returns (shader_name, params) where params keys
-    are lowercased top-level parameters like "$basetexture".
-    """
     with open(path, "r", encoding="utf-8", errors="ignore") as handle:
         tokens = _tokenize(handle.read())
 

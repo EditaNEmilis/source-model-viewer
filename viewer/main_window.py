@@ -1,7 +1,8 @@
 import os
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QCoreApplication, QSettings
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from viewer.flex_info import parse_flex_info
 from viewer.dmx_parser import is_dmx_file, load_dmx
+from viewer.mdl_parser import is_mdl_file, parse_mdl
 from viewer.smd_parser import parse_smd
 from viewer.viewport import Viewport
 
@@ -32,10 +34,14 @@ from viewer.help_dialogs import (
     show_help_dialog,
 )
 
+from viewer.settings_dialog import SettingsDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        QCoreApplication.setOrganizationName("SourceModelViewer")
+        QCoreApplication.setApplicationName("SourceModelViewer")
 
         self.setWindowTitle("Source Model Viewer")
         self.resize(1024, 768)
@@ -160,6 +166,7 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.apply_settings()
         self.viewport.setFocus()
 
     def _create_actions(self):
@@ -232,6 +239,11 @@ class MainWindow(QMainWindow):
         self.about_action.setStatusTip("About this viewer")
         self.about_action.triggered.connect(self.show_about)
 
+        self.settings_action = QAction("&Settings...", self)
+        self.settings_action.setShortcut("Ctrl+,")
+        self.settings_action.setStatusTip("Configure viewer preferences")
+        self.settings_action.triggered.connect(self.open_settings)
+
         self.culling_action = QAction("Backface Culling", self)
         self.culling_action.setCheckable(True)
         self.culling_action.setChecked(False)
@@ -265,6 +277,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.clear_sequence_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
+        file_menu.addAction(self.materials_folder_action)
+        file_menu.addAction(self.settings_action)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.reset_camera_action)
@@ -307,7 +321,7 @@ class MainWindow(QMainWindow):
             self,
             "Open Model",
             "",
-            "Source Model Data (*.smd *.vta *.dmx);;Vertex Animation (*.vta);;DMX Model (*.dmx);;All Files (*)",
+            "Source Model Files (*.smd *.vta *.dmx *.mdl);;Source Compiled Model (*.mdl);;StudioModel Data (*.smd);;Vertex Animation (*.vta);;Data Model eXchange (*.dmx);;All Files (*)",
         )
 
         if not file_path:
@@ -315,6 +329,31 @@ class MainWindow(QMainWindow):
 
         if is_dmx_file(file_path):
             self.open_dmx_model(file_path)
+            return
+
+        if is_mdl_file(file_path) or file_path.lower().endswith(".mdl"):
+            try:
+                parsed = parse_mdl(file_path)
+            except Exception as error:
+                QMessageBox.critical(
+                    self,
+                    "Load Error",
+                    f"Could not load compiled MDL model.\n{error}",
+                )
+                return
+
+            # Auto-mount materials directory before applying model
+            auto_mat = self._auto_add_materials_root(file_path)
+
+            self.viewport.set_model(parsed)
+            self.viewport.set_animation_targets([])
+            self.stop_playback()
+            self.update_animation_ui()
+
+            msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
+            if auto_mat:
+                msg += f" (Mounted materials: {auto_mat})"
+            self.statusBar().showMessage(msg)
             return
 
         try:
@@ -405,13 +444,12 @@ class MainWindow(QMainWindow):
                     "This file does not contain triangles or vertex animation.\n\n" + details,
                 )
 
-            return
+        settings = QSettings("SourceModelViewer", "Settings")
+        auto_mount_enabled = settings.value("materials/auto_mount", True, type=bool)
 
-        if self.animation_targets:
-            self._try_auto_flex_info(file_path)
-
-            if self.flex_info is not None:
-                self.apply_flex_info(self.flex_info, self.flex_info_override)
+        auto_mat = None
+        if auto_mount_enabled:
+            auto_mat = self._auto_add_materials_root(file_path)
 
     def open_dmx_model(self, file_path):
         try:
@@ -486,7 +524,7 @@ class MainWindow(QMainWindow):
             self,
             "Open Sequence SMD",
             "",
-            "Source Model Data (*.smd);;All Files (*)",
+            "StudioModel Data (*.smd);;All Files (*)",
         )
 
         if not file_path:
@@ -630,6 +668,27 @@ class MainWindow(QMainWindow):
             self.viewport.renderer.add_material_directory(dir_path)
             self.viewport.update()
             self.statusBar().showMessage(f"Materials folder: {dir_path}")
+
+    def _auto_add_materials_root(self, file_path):
+        norm = os.path.normpath(file_path)
+        parts = norm.split(os.sep)
+
+        # Check for standard <root>/models/... directory layout
+        for i in range(len(parts) - 1, 0, -1):
+            if parts[i].lower() == "models":
+                root = os.sep.join(parts[:i])
+                candidate = os.path.join(root, "materials")
+                if os.path.isdir(candidate):
+                    self.viewport.renderer.add_material_directory(candidate)
+                    return candidate
+
+        # Check adjacent materials/ folder
+        direct_candidate = os.path.join(os.path.dirname(file_path), "materials")
+        if os.path.isdir(direct_candidate):
+            self.viewport.renderer.add_material_directory(direct_candidate)
+            return direct_candidate
+
+        return None
 
     def _try_auto_flex_info(self, file_path):
         base_path = os.path.splitext(file_path)[0]
@@ -1173,3 +1232,48 @@ class MainWindow(QMainWindow):
 
     def show_about(self):
         show_help_dialog(self, "About", about_html(), width=480, height=440)
+
+    def apply_settings(self):
+        settings = QSettings("SourceModelViewer", "Settings")
+
+        # Viewport settings
+        bg_raw = settings.value("viewport/bg_color", "#1a1a1c")
+        bg_hex = str(bg_raw) if bg_raw else "#1a1a1c"
+        qcolor = QColor(bg_hex)
+        if not qcolor.isValid():
+            qcolor = QColor("#1a1a1c")
+
+        self.viewport.renderer.set_background_color(
+            qcolor.redF(), qcolor.greenF(), qcolor.blueF(), 1.0
+        )
+
+        show_grid = settings.value("viewport/show_grid", True, type=bool)
+        self.viewport.renderer.set_show_grid(show_grid)
+
+        fov = settings.value("viewport/fov", 45, type=int)
+        self.viewport.renderer.camera.fov = fov
+
+        # Default materials folder if set
+        default_mat = settings.value("materials/default_dir", "", type=str)
+        if default_mat and os.path.isdir(default_mat):
+            self.viewport.renderer.add_material_directory(default_mat)
+
+        # Defaults
+        default_fps = settings.value("defaults/fps", 30, type=int)
+        self.fps_spin.setValue(default_fps)
+
+        culling = settings.value("defaults/culling", False, type=bool)
+        self.culling_action.setChecked(culling)
+        self.viewport.set_backface_culling(culling)
+
+        proximity = settings.value("defaults/proximity_skin", False, type=bool)
+        self.proximity_skin_action.setChecked(proximity)
+        self.viewport.set_proximity_skin(proximity)
+
+        self.viewport.update()
+
+    def open_settings(self):
+        dialog = SettingsDialog(self)
+        if dialog.exec():
+            self.apply_settings()
+            self.statusBar().showMessage("Settings saved")
