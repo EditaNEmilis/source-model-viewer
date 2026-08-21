@@ -4,6 +4,19 @@ Changelog of each versions.
 
 ## [0.6.0] | MDL and Preferences
 
+### [0.6.1]
+
+#### Fixed
+- Compiled MDL textures rendered vertically mirrored. VVD texture coordinates
+  are stored in the render-ready V convention, the parser now flags them
+  pre-flipped instead of letting the renderer flip them a second time.
+- Bodyparts after the first silently produced zero triangles. 
+  `mstudiomodel_t.vertexindex` is a byte offset into the VVD vertex pool
+  (48 bytes per vertex), not a vertex index. Multi-bodypart models now load
+  all their bodygroups.
+- VVD fixup reconstruction now only concatenates LOD 0 fixup runs instead of
+  appending every LOD's vertices into the reconstructed pool.
+
 ### Added
 - Compiled Source engine model support (`.mdl`).
 - Binary vertex buffer decoder (`.vvd`) supporting LOD 0 vertex reconstruction and fixup tables.

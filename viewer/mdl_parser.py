@@ -62,14 +62,14 @@ def _parse_vvd(vvd_path: str, expected_checksum: int) -> List[Tuple[Tuple[float,
         raise MdlParseError(f"Invalid VVD magic header: {magic:#x}")
 
     num_lod_verts = struct.unpack_from("<8i", data, 16)
-    num_fixups, fixup_table_start, vertex_data_start, _ = struct.unpack_from("<4i", data, 48)
+    num_fixups, fixup_table_start, vertex_data_start, tangent_data_start = struct.unpack_from("<4i", data, 48)
 
     resolved_vertices = []
 
     if num_fixups > 0:
         for i in range(num_fixups):
             lod, source_vert_id, num_verts = struct.unpack_from("<3i", data, fixup_table_start + i * 12)
-            if lod >= 0:
+            if lod == 0:
                 for v in range(num_verts):
                     v_idx = source_vert_id + v
                     offset = vertex_data_start + v_idx * 48
@@ -193,27 +193,33 @@ def parse_mdl(mdl_path: str) -> SmdModel:
         if available_models <= 0:
             continue
 
-        # Choose the first sub-model with valid meshes
-        chosen_model_idx = 0
+        variant_meshes = []
         for test_idx in range(available_models):
             test_m_offset = bp_offset + modelindex + test_idx * 148
-            test_nummeshes = struct.unpack_from("<i", data, test_m_offset + 72)[0]
-            if test_nummeshes > 0:
+            variant_meshes.append(
+                struct.unpack_from("<i", data, test_m_offset + 72)[0]
+            )
+
+        chosen_model_idx = 0
+        for test_idx, count in enumerate(variant_meshes):
+            if count > 0:
                 chosen_model_idx = test_idx
                 break
 
         m_i = chosen_model_idx
         m_offset = bp_offset + modelindex + m_i * 148
-        _, _, nummeshes, meshindex, _, vertexindex = struct.unpack_from("<ifi3i", data, m_offset + 64)
+        _, _, nummeshes, meshindex, _, vertexindex = struct.unpack_from(
+            "<ifi3i", data, m_offset + 64
+        )
 
         vtx_m_pos = vtx_bp_pos + vtx_model_offset + m_i * 8
         _, vtx_lod_offset = struct.unpack_from("<2i", vtx_data, vtx_m_pos)
 
-        # LOD 0
         vtx_lod0_pos = vtx_m_pos + vtx_lod_offset
-        vtx_nummeshes, vtx_mesh_offset, _ = struct.unpack_from("<2if", vtx_data, vtx_lod0_pos)
+        vtx_nummeshes, vtx_mesh_offset, _ = struct.unpack_from(
+            "<2if", vtx_data, vtx_lod0_pos
+        )
 
-        # Check MeshHeader_t stride (12 bytes aligned vs 9 bytes packed)
         mesh_header_stride = 12
         if vtx_nummeshes > 1:
             test_pos_12 = vtx_lod0_pos + vtx_mesh_offset + 12
@@ -225,7 +231,6 @@ def parse_mdl(mdl_path: str) -> SmdModel:
             mesh_offset = m_offset + meshindex + mesh_i * 116
             mat_id, _, _, vertexoffset = struct.unpack_from("<4i", data, mesh_offset)
 
-            # Resolve through skin table if available
             actual_mat_id = mat_id
             if skin_table and 0 <= mat_id < len(skin_table):
                 actual_mat_id = skin_table[mat_id]
@@ -234,33 +239,44 @@ def parse_mdl(mdl_path: str) -> SmdModel:
             if 0 <= actual_mat_id < len(textures):
                 mat_name = textures[actual_mat_id]
 
-            model_materials.add(mat_name)
-
             vtx_mesh_pos = vtx_lod0_pos + vtx_mesh_offset + mesh_i * mesh_header_stride
-            num_strip_groups, strip_group_header_offset, _ = struct.unpack_from("<2iB", vtx_data, vtx_mesh_pos)
+            num_strip_groups, strip_group_header_offset, _ = struct.unpack_from(
+                "<2iB", vtx_data, vtx_mesh_pos
+            )
 
-            for sg_i in range(num_strip_groups):
+            tris_here = 0
+            map_lo = None
+            map_hi = None
+            dropped = 0
+
+            for sg_i in range(max(0, min(num_strip_groups, 64))):
                 sg_pos = vtx_mesh_pos + strip_group_header_offset + sg_i * sg_size
                 num_verts, vert_offset, num_indices, index_offset, num_strips, strip_offset, _ = struct.unpack_from(
                     "<6iB", vtx_data, sg_pos
                 )
 
                 sg_vert_mapping = []
-                for v_i in range(num_verts):
+                for v_i in range(max(0, min(num_verts, 65535))):
                     v_pos = sg_pos + vert_offset + v_i * 9
                     orig_mesh_vert_id = struct.unpack_from("<H", vtx_data, v_pos + 4)[0]
-                    vvd_index = vertexindex + vertexoffset + orig_mesh_vert_id
-                    sg_vert_mapping.append(vvd_index)
+                    vid = vertexindex // 48 + vertexoffset + orig_mesh_vert_id
+                    sg_vert_mapping.append(vid)
+                    map_lo = vid if map_lo is None else min(map_lo, vid)
+                    map_hi = vid if map_hi is None else max(map_hi, vid)
 
-                raw_indices = vtx_data[sg_pos + index_offset:sg_pos + index_offset + num_indices * 2]
+                raw_indices = vtx_data[
+                    sg_pos + index_offset : sg_pos + index_offset + num_indices * 2
+                ]
                 sg_indices = struct.unpack(f"<{num_indices}H", raw_indices)
 
                 for st_i in range(num_strips):
                     st_pos = sg_pos + strip_offset + st_i * strip_header_size
-                    st_num_indices, st_index_offset, _, _, _, st_flags = struct.unpack_from("<4ihB", vtx_data, st_pos)
+                    st_num_indices, st_index_offset, _, _, _, st_flags = struct.unpack_from(
+                        "<4ihB", vtx_data, st_pos
+                    )
 
                     triangles = []
-                    if st_flags & 0x02:  # TRISTRIP
+                    if st_flags & 0x02:
                         for k in range(st_num_indices - 2):
                             i0 = sg_indices[st_index_offset + k]
                             i1 = sg_indices[st_index_offset + k + 1]
@@ -269,7 +285,7 @@ def parse_mdl(mdl_path: str) -> SmdModel:
                                 i0, i1 = i1, i0
                             if i0 != i1 and i1 != i2 and i0 != i2:
                                 triangles.append((i0, i1, i2))
-                    else:  # TRILIST
+                    else:
                         for k in range(0, st_num_indices, 3):
                             if k + 2 < st_num_indices:
                                 triangles.append((
@@ -282,6 +298,7 @@ def parse_mdl(mdl_path: str) -> SmdModel:
                         tri_indices = []
                         for idx in (i0, i1, i2):
                             if idx >= len(sg_vert_mapping):
+                                dropped += 1
                                 continue
                             vvd_idx = sg_vert_mapping[idx]
                             if 0 <= vvd_idx < len(vvd_vertices):
@@ -303,6 +320,8 @@ def parse_mdl(mdl_path: str) -> SmdModel:
                                 for axis in range(3):
                                     min_bound[axis] = min(min_bound[axis], pos[axis])
                                     max_bound[axis] = max(max_bound[axis], pos[axis])
+                            else:
+                                dropped += 1
 
                         if len(tri_indices) == 3:
                             model_triangles.append(
@@ -311,6 +330,7 @@ def parse_mdl(mdl_path: str) -> SmdModel:
                                     indices=(tri_indices[0], tri_indices[1], tri_indices[2]),
                                 )
                             )
+                            tris_here += 1
 
     model.vertices = model_vertices
     model.triangles = model_triangles

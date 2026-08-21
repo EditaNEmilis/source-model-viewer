@@ -208,7 +208,7 @@ class Renderer:
             texcoords = np.array(
                 [vertex.uv for vertex in model.vertices], dtype=np.float32
             )
-            if not model.uv_pre_flipped:
+            if model.uv_pre_flipped == True:
                 texcoords[:, 1] = 1.0 - texcoords[:, 1]
 
             self.model_center = [
@@ -281,7 +281,6 @@ class Renderer:
         if not name:
             return None
 
-        # Clean string, strip quotes, normalize slashes
         clean_name = name.strip().replace("\\", "/").strip('"/')
 
         dot = clean_name.rfind(".")
@@ -290,38 +289,30 @@ class Renderer:
             if existing in ("vtf", "vmt", "bmp", "tga", "png", "jpg", "jpeg"):
                 clean_name = clean_name[:dot]
 
-        # Strip materials/ prefix if present
         if clean_name.lower().startswith("materials/"):
             clean_name = clean_name[10:]
 
-        # 1. Build relative candidate list
-        relative_candidates = [
-            clean_name + ext,
-            "materials/" + clean_name + ext,
-        ]
-
-        # Combine with all cdmaterials paths
+        relative_candidates = []
         for cddir in self.model_material_dirs:
             cddir_clean = cddir.strip("/")
             if cddir_clean:
-                relative_candidates.append(f"{cddir_clean}/{clean_name}" + ext)
-                relative_candidates.append(f"materials/{cddir_clean}/{clean_name}" + ext)
+                relative_candidates.append(cddir_clean + "/" + clean_name + ext)
 
-        # 2. Check direct paths across mounted directories
-        for search_dir in self.material_dirs:
-            search_clean = os.path.normpath(search_dir)
-            for candidate in relative_candidates:
+        relative_candidates.append(clean_name + ext)
+        relative_candidates.append("materials/" + clean_name + ext)
+
+        for candidate in relative_candidates:
+            for search_dir in self.material_dirs:
+                search_clean = os.path.normpath(search_dir)
                 full_path = os.path.join(search_clean, candidate)
                 if os.path.isfile(full_path):
                     return full_path
 
-                # Check inside materials/ subfolder without duplicating prefix
                 if not candidate.lower().startswith("materials/"):
                     mat_full = os.path.join(search_clean, "materials", candidate)
                     if os.path.isfile(mat_full):
                         return mat_full
 
-        # 3. Fast probe in model's specific material folders
         target_name = os.path.basename(clean_name).lower() + ext
         for search_dir in self.material_dirs:
             for cddir in self.model_material_dirs:
