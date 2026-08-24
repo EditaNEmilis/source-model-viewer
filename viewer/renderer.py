@@ -252,6 +252,8 @@ class Renderer:
 
         self.set_skeletal_frame(self.skinning.frame)
 
+        self.embedded_textures = dict(getattr(model, "embedded_textures", {}) or {})
+
     def set_animation_targets(self, targets):
         self.animator.targets = targets if targets else []
         self.rebuild_animation_frames()
@@ -396,6 +398,25 @@ class Renderer:
             "color": (1.0, 1.0, 1.0, 1.0),
         }
 
+        # Embedded textures (GoldSrc MDL): decoded at parse time, no
+        # filesystem lookup needed.
+        embedded = self.embedded_textures.get(material_name)
+
+        if embedded is not None:
+            flags = 0
+            if self.model is not None:
+                flags = (self.model.metadata.get("texture_flags", {}) or {}).get(
+                    material_name, 0
+                )
+
+            props["selfillum"] = bool(flags & 4)    # STUDIO_NF_FULLBRIGHT
+            props["alphatest"] = bool(flags & 64)   # STUDIO_NF_MASKED
+            self.material_props[material_name] = props
+
+            tex_id = self._upload_rgba_texture(embedded)
+            self.texture_cache[material_name] = tex_id
+            return tex_id
+
         vmt_path = self._resolve_path(material_name, ".vmt")
         if vmt_path and os.path.isfile(vmt_path):
             try:
@@ -414,7 +435,6 @@ class Renderer:
 
         self.material_props[material_name] = props
 
-        # Check if batch should be skipped entirely
         if props["nodraw"]:
             self.texture_cache[material_name] = None
             return None
@@ -435,6 +455,11 @@ class Renderer:
         if not is_transparent and rgba.shape[2] == 4:
             rgba[:, :, 3] = 255
 
+        tex_id = self._upload_rgba_texture(rgba)
+        self.texture_cache[material_name] = tex_id
+        return tex_id
+
+    def _upload_rgba_texture(self, rgba):
         tex_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, tex_id)
 
@@ -451,8 +476,6 @@ class Renderer:
 
         glGenerateMipmap(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, 0)
-
-        self.texture_cache[material_name] = tex_id
         return tex_id
 
     def _build_material_batches(self):

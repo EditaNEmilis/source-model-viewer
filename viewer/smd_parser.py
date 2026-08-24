@@ -2,6 +2,7 @@
 
 import math
 import re
+import numpy as np
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -63,6 +64,7 @@ class SmdModel:
     has_animation: bool = False
     uv_pre_flipped: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    embedded_textures: Dict[str, "np.ndarray"] = field(default_factory=dict)
 
 ###
 

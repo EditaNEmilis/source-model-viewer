@@ -30,6 +30,32 @@ Changelog of each versions.
 - Eye shader texture resolution: prioritizes `$iris` for character eyes to prevent blank scleras.
 - Skin replacement table translation via `skinreference_index`.
 
+### [0.6.2]
+
+#### Added
+- GoldSrc MDL (HLMDL) support: Half-Life 1 models (IDST version 10) load
+  through a version dispatch in the compiled model parser, sharing the
+  existing SmdModel pipeline, skinning, and validation tooling.
+- Embedded texture decoding: 8-bit palettized textures are converted to
+  RGBA at parse time and uploaded directly, with per-texture palette and
+  no filesystem lookup.
+- External texture companion files: models storing textures in a
+  `<name>T.mdl` side file resolve automatically.
+- Skin family 0 translation for mesh-to-texture assignment.
+- STUDIO_NF_MASKED binary transparency (palette entry 255) via the
+  existing alpha test path.
+- STUDIO_NF_FULLBRIGHT mapped to the unlit render path.
+
+#### Changed
+- Renderer texture upload unified into a shared RGBA helper used by both
+  the VTF and embedded texture paths.
+
+#### Notes
+- Chrome (sphere map) textures sample flat; runtime sphere-mapped
+  coordinates are not computed.
+- Sequence animation data (compressed animvalues) is not loaded yet;
+  models show their bind pose. Planned as the follow-up feature.
+
 ### Changed
 - File open dialog now accepts `.mdl` alongside `.smd`, `.vta`, and `.dmx`.
 - Completely removed runtime recursive filesystem scanning in texture resolution to eliminate loading freezes.

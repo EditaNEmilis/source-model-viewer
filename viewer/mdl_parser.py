@@ -111,6 +111,10 @@ def parse_mdl(mdl_path: str) -> SmdModel:
     if magic != 0x54534449:  # 'IDST'
         raise MdlParseError("Not a valid Source MDL file")
 
+    if version < 25:
+        from viewer.goldsrc_parser import parse_hlmdl
+        return parse_hlmdl(mdl_path)
+
     vvd_path = _find_companion_file(mdl_path, [".vvd"])
     if not vvd_path:
         raise MdlParseError(f"Missing companion VVD file for {os.path.basename(mdl_path)}")
