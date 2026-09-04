@@ -68,6 +68,42 @@ Changelog of each versions.
 - Prevented double `materials/materials/` path nesting when resolving VMT relative texture paths.
 - Background color now applies immediately and persists across application restarts.
 
+### [0.6.3]
+
+#### Added
+- HL2 beta model support (MDL version 37, 2001-2003 era builds): vertices
+  load directly from the MDL as 64-byte records (blend weights, position,
+  normal, UV), bones from the 196-byte struct including the poseToBone
+  matrix, meshes from 68-byte entries, and triangles decode from the
+  companion version 6 VTX strips. Bodyparts use the 16-byte entry layout
+  with sequential 280-byte model slots.
+- Compiled MDL skeletal animation loading: parses local `mstudioanimdesc_t` sequences and
+  decodes per-bone RLE data (quaternion64/quaternion48 rotations, half-float positions,
+  delta rotation/position channels) into playable clips.
+- External `.ani` animation block container support, including animblock table discovery.
+- `$includemodel` chain merging: opening a model now also loads animation clips from its
+  included models when they sit next to it, with cycle protection.
+- Animation-only MDL loads: missing `.vvd` / `.vtx` companions no longer abort parsing,
+  bones and sequences still load.
+
+#### Fixed
+- Compiled models built with extended VTX headers rendered corrupted meshes:
+  strip group, strip, and mesh header strides were guessed from the MDL
+  version instead of read from the data. All three are now located by scoring
+  candidate chains against the MDL topology, trying relative and absolute
+  offset variants at every level of the bodypart/model/LOD hierarchy.
+- VVD vertex pools built from interleaved fixup tables came out truncated.
+  Newer compilers emit fixup runs of every LOD in file order; when those runs
+  cover the LOD vertex count the pool is rebuilt by concatenating them in
+  file order, otherwise vertices fall back to original pool order. Fixes
+  missing body geometry on such models.
+- Multi-bodygroup models derailed VTX chain discovery when a bodypart variant
+  slot contained no geometry; empty variants are now skipped while locating
+  the strip chain.
+- Strip group vertex ids are decoded through version-aware record layouts
+  (9 bytes with id at +4 on current files, 15 bytes with id at +12 on beta
+  ones), fixing scrambled vertex references.
+
 ## [0.5.0] | VTF Support
 
 ### [0.5.1]

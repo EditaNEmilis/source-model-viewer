@@ -347,12 +347,36 @@ class MainWindow(QMainWindow):
 
             self.viewport.set_model(parsed)
             self.viewport.set_animation_targets([])
+
+            clips = parsed.metadata.get("animation_clips") or []
+            if clips:
+                self._clip_models = clips
+                self.viewport.set_animation_clips(clips)
+                self.clip_combo.clear()
+                for clip_name, clip_model in clips:
+                    meta = clip_model.metadata
+                    frames = len(clip_model.frames) if clip_model.frames else 0
+                    duration = meta.get("duration", 0.0)
+                    label = f"{clip_name} ({frames} frames, {duration:.2f}s)"
+                    self.clip_combo.addItem(label, clip_name)
+                if clips:
+                    self.clip_combo.setCurrentIndex(0)
+                    self.clip_combo.setEnabled(True)
+            else:
+                self._clip_models = []
+                self.viewport.set_animation_clips([])
+
             self.stop_playback()
             self.update_animation_ui()
 
             msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
             if auto_mat:
                 msg += f" (Mounted materials: {auto_mat})"
+            if clips:
+                msg += f" and {len(clips)} animation clips"
+            anim_error = parsed.metadata.get("animation_error")
+            if anim_error:
+                msg += f" (animation error: {anim_error})"
             self.statusBar().showMessage(msg)
             return
 
