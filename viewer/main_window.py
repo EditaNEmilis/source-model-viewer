@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from viewer.flex_info import parse_flex_info
 from viewer.dmx_parser import is_dmx_file, load_dmx
-from viewer.mdl_parser import is_mdl_file, parse_mdl
+from viewer.mdl_parser import is_mdl_file, is_vmdl_c_file, parse_mdl
 from viewer.smd_parser import parse_smd
 from viewer.viewport import Viewport
 
@@ -316,12 +316,54 @@ class MainWindow(QMainWindow):
 
         return details
 
+    def _display_compiled_model(self, parsed, file_path):
+        # Shared post-parse handling for compiled models (Source 1 MDL
+        # and Source 2 .vmdl_c): mount materials, push to the viewport,
+        # wire animation clips, and report the load in the status bar.
+        auto_mat = self._auto_add_materials_root(file_path)
+
+        self.viewport.set_model(parsed)
+        self.viewport.set_animation_targets([])
+
+        clips = parsed.metadata.get("animation_clips") or []
+        if clips:
+            self._clip_models = clips
+            self.viewport.set_animation_clips(clips)
+            self.clip_combo.clear()
+            for clip_name, clip_model in clips:
+                meta = clip_model.metadata
+                frames = len(clip_model.frames) if clip_model.frames else 0
+                duration = meta.get("duration", 0.0)
+                label = f"{clip_name} ({frames} frames, {duration:.2f}s)"
+                self.clip_combo.addItem(label, clip_name)
+            if clips:
+                self.clip_combo.setCurrentIndex(0)
+                self.clip_combo.setEnabled(True)
+        else:
+            self._clip_models = []
+            self.viewport.set_animation_clips([])
+
+        self.stop_playback()
+        self.update_animation_ui()
+
+        msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
+        if auto_mat:
+            msg += f" (Mounted materials: {auto_mat})"
+        if clips:
+            msg += f" and {len(clips)} animation clips"
+        anim_error = parsed.metadata.get("animation_error")
+        if anim_error:
+            msg += f" (animation error: {anim_error})"
+        if parsed.metadata.get("vmdl_truncated_tail"):
+            msg += " (partial: trailing Source 2 scene data skipped)"
+        self.statusBar().showMessage(msg)
+
     def open_model(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Model",
             "",
-            "Source Model Files (*.smd *.vta *.dmx *.mdl);;Source Compiled Model (*.mdl);;StudioModel Data (*.smd);;Vertex Animation (*.vta);;Data Model eXchange (*.dmx);;All Files (*)",
+            "Source Model Files (*.smd *.vta *.dmx *.mdl *.vmdl_c);;Source Compiled Model (*.mdl);;Source 2 Compiled Model (*.vmdl_c);;StudioModel Data (*.smd);;Vertex Animation (*.vta);;Data Model eXchange (*.dmx);;All Files (*)",
         )
 
         if not file_path:
@@ -329,6 +371,22 @@ class MainWindow(QMainWindow):
 
         if is_dmx_file(file_path):
             self.open_dmx_model(file_path)
+            return
+
+        if file_path.lower().endswith(".vmdl_c") or is_vmdl_c_file(file_path):
+            from viewer.vmdl_parser import parse_vmdl_c
+
+            try:
+                parsed = parse_vmdl_c(file_path)
+            except Exception as error:
+                QMessageBox.critical(
+                    self,
+                    "Load Error",
+                    f"Could not load Source 2 model.\n{error}",
+                )
+                return
+
+            self._display_compiled_model(parsed, file_path)
             return
 
         if is_mdl_file(file_path) or file_path.lower().endswith(".mdl"):
@@ -342,42 +400,7 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            # Auto-mount materials directory before applying model
-            auto_mat = self._auto_add_materials_root(file_path)
-
-            self.viewport.set_model(parsed)
-            self.viewport.set_animation_targets([])
-
-            clips = parsed.metadata.get("animation_clips") or []
-            if clips:
-                self._clip_models = clips
-                self.viewport.set_animation_clips(clips)
-                self.clip_combo.clear()
-                for clip_name, clip_model in clips:
-                    meta = clip_model.metadata
-                    frames = len(clip_model.frames) if clip_model.frames else 0
-                    duration = meta.get("duration", 0.0)
-                    label = f"{clip_name} ({frames} frames, {duration:.2f}s)"
-                    self.clip_combo.addItem(label, clip_name)
-                if clips:
-                    self.clip_combo.setCurrentIndex(0)
-                    self.clip_combo.setEnabled(True)
-            else:
-                self._clip_models = []
-                self.viewport.set_animation_clips([])
-
-            self.stop_playback()
-            self.update_animation_ui()
-
-            msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
-            if auto_mat:
-                msg += f" (Mounted materials: {auto_mat})"
-            if clips:
-                msg += f" and {len(clips)} animation clips"
-            anim_error = parsed.metadata.get("animation_error")
-            if anim_error:
-                msg += f" (animation error: {anim_error})"
-            self.statusBar().showMessage(msg)
+            self._display_compiled_model(parsed, file_path)
             return
 
         try:

@@ -4,19 +4,6 @@ Changelog of each versions.
 
 ## [0.6.0] | MDL and Preferences
 
-### [0.6.1]
-
-#### Fixed
-- Compiled MDL textures rendered vertically mirrored. VVD texture coordinates
-  are stored in the render-ready V convention, the parser now flags them
-  pre-flipped instead of letting the renderer flip them a second time.
-- Bodyparts after the first silently produced zero triangles. 
-  `mstudiomodel_t.vertexindex` is a byte offset into the VVD vertex pool
-  (48 bytes per vertex), not a vertex index. Multi-bodypart models now load
-  all their bodygroups.
-- VVD fixup reconstruction now only concatenates LOD 0 fixup runs instead of
-  appending every LOD's vertices into the reconstructed pool.
-
 ### Added
 - Compiled Source engine model support (`.mdl`).
 - Binary vertex buffer decoder (`.vvd`) supporting LOD 0 vertex reconstruction and fixup tables.
@@ -29,6 +16,19 @@ Changelog of each versions.
 - VMT shader parameter support: `$nocull`, `$no_draw`, `$selfillum`, `$color` / `$color2`, `$translucent`, and `$alphatest`.
 - Eye shader texture resolution: prioritizes `$iris` for character eyes to prevent blank scleras.
 - Skin replacement table translation via `skinreference_index`.
+
+### [0.6.1]
+
+#### Fixed
+- Compiled MDL textures rendered vertically mirrored. VVD texture coordinates
+  are stored in the render-ready V convention, the parser now flags them
+  pre-flipped instead of letting the renderer flip them a second time.
+- Bodyparts after the first silently produced zero triangles. 
+  `mstudiomodel_t.vertexindex` is a byte offset into the VVD vertex pool
+  (48 bytes per vertex), not a vertex index. Multi-bodypart models now load
+  all their bodygroups.
+- VVD fixup reconstruction now only concatenates LOD 0 fixup runs instead of
+  appending every LOD's vertices into the reconstructed pool.
 
 ### [0.6.2]
 
@@ -53,20 +53,9 @@ Changelog of each versions.
 #### Notes
 - Chrome (sphere map) textures sample flat; runtime sphere-mapped
   coordinates are not computed.
-- Sequence animation data (compressed animvalues) is not loaded yet;
-  models show their bind pose. Planned as the follow-up feature.
-
-### Changed
-- File open dialog now accepts `.mdl` alongside `.smd`, `.vta`, and `.dmx`.
-- Completely removed runtime recursive filesystem scanning in texture resolution to eliminate loading freezes.
-- Alpha channel masking: textures with Phong specular masks are rendered opaque unless `$translucent` or `$alphatest` is explicitly enabled.
-- Help dialogs updated with MDL pipeline details, Settings documentation, and 0.6.0 version info.
-
-### Fixed
-- Stacking sub-models: bodyparts now pick visible meshes rather than rendering all alternate options on top of each other.
-- VTX `MeshHeader_t` struct stride aligned to 12 bytes to prevent index and material corruption across multi-mesh models.
-- Prevented double `materials/materials/` path nesting when resolving VMT relative texture paths.
-- Background color now applies immediately and persists across application restarts.
+- Sequence animation data (compressed animvalues) is not loaded yet
+  for retail GoldSrc models; those show their bind pose. HL1 alpha
+  sequences and Source skeletal clips already load as playable clips.
 
 ### [0.6.3]
 
@@ -104,30 +93,60 @@ Changelog of each versions.
   (9 bytes with id at +4 on current files, 15 bytes with id at +12 on beta
   ones), fixing scrambled vertex references.
 
-## [0.5.0] | VTF Support
-
-### [0.5.1]
+### [0.6.4]
 
 #### Added
-- VMT (Valve Material) fallback. When a material has no .vtf of its own, the viewer reads the
-  matching .vmt and follows its `$basetexture` reference (or `$iris` for Eye shader
-  materials, `$maintexture` as a last resort) to the real texture.
-- New vmt_parser.py module with a small KeyValues tokenizer that skips nested blocks
-  like Proxies and lowercases parameter names.
+- Half-Life 1 alpha MDL support (IDST version 6): shorter studiohdr,
+  60-byte bones, shared 80-byte texture entries, flat triangle lists.
+  The barney, polyrobo and prdroid samples load with bones, skinning,
+  materials and embedded textures.
+- External GoldSrc animation libraries (IDSQ, e.g. HD pack *01.mdl
+  files) are detected and explain themselves instead of failing with
+  a generic parse error.
+- Source 2 compiled model inventory (`read_vmdl_c_info`): resource
+  block table, material paths, source refs and mesh/drawcall
+  estimates for `.vmdl_c` files.
+- Source 2 mesh import (`viewer/vmdl_parser.py`): LZ4 + KV3 v1 MDAT
+  draw-call reader plus MBUF (VBIB-layout) vertex/index buffers.
+  `.vmdl_c` files open in the GUI with positions, normals, UVs and
+  material names. Blend weights and the real skeleton still open
+  (single dummy root bone for now); files whose MDAT tail is
+  truncated load their complete draw calls with a status-bar note.
+- HL1 alpha sequence animation: every sequence decodes its per-bone
+  position/rotation tracks into playable clips (fps, looping flag,
+  frame-aware hold sampling for sparse tracks), wired to the clip dropdown.
 
 #### Fixed
-- Out-of-range triangle indices could reach the GL index buffer on the textured draw
-  path. `_build_material_batches` now validates indices the same way `_build_indices` does.
-- DMX models with flipVCoordinates set had their V coordinate flipped twice. The model
-  now carries a `uv_pre_flipped` flag and the renderer skips its own flip in that case.
-- VTF 7.3+ files with a thumbnail decoded from a shifted offset. The low-res skip now
-  only applies to 7.2 and older, since 7.3+ stores the thumbnail as its own resource
-  and the high-res offset already points past it.
-- Replaced the fragile *locals()* check in `open_dmx_model` with an explicit message
-  variable initialized to *None*.
-- The clip dropdown now syncs with the renderer's current clip by matching user data,
-  so decorated labels like "ref (30 frames, 1.00s)" resolve correctly. `open_sequence`
-  stores the clip name as user data too for consistency.
+- Half-Life 1 alpha sequence table: the bone-track base is the +92
+  `animindex` pointer, not the +44 `eventindex`. Sequences with events
+  or pivots (polyrobo walk: 4 events + 4 pivots, dance: 24 events;
+  barney shootgun: 1 event) previously decoded event bytes as bone
+  headers and froze at the bind pose. Walk and shootgun now animate;
+  sparse rot tracks sample by frame number instead of record index.
+- Half-Life 1 alpha skeletons: bind positions and rotations are now
+  read from the first sequence's track block (float pos quads,
+  centidegree euler rot quads) instead of the zeroed bone-table
+  fields. All sample skeletons validate with clean parent chains and
+  joints inside the mesh bounds.
+- External texture companion (`<name>T.mdl`, used by split Half-Life
+  HD models) lookup is now case-insensitive.
+- Missing tracks hold the bind pose instead of collapsing to the
+  origin, so one bad track never breaks the whole model.
+
+#### Changed
+- Completely removed runtime recursive filesystem scanning in texture resolution to eliminate loading freezes.
+- File open dialog now accepts `.mdl` and `.vmdl_c` alongside `.smd`, `.vta`, and `.dmx`; compiled Source 1 and Source 2 models share one display path (materials mount, clip dropdown, status-bar report with animation errors and partial-tail notes).
+- Alpha channel masking: textures with Phong specular masks are rendered opaque unless `$translucent` or `$alphatest` is explicitly enabled.
+- Help dialogs updated with MDL pipeline details, Settings documentation, and 0.6.4 version info (alpha/beta/Source 2 coverage, clip playback).
+
+#### Fixed
+- `parse_mdl` now rejects Source 2 containers (`MRPH`) and GoldSrc animation libraries (`IDSQ`) with actionable messages instead of generic parse errors; `is_mdl_file`/`is_vmdl_c_file` route each kind to the right loader.
+- Stacking sub-models: bodyparts now pick visible meshes rather than rendering all alternate options on top of each other.
+- VTX `MeshHeader_t` struct stride aligned to 12 bytes to prevent index and material corruption across multi-mesh models.
+- Prevented double `materials/materials/` path nesting when resolving VMT relative texture paths.
+- Background color now applies immediately and persists across application restarts.
+
+## [0.5.0] | VTF Support
 
 ### Added
 - VTF (Valve Texture Format) texture loading from a user-selected materials directory.
@@ -153,19 +172,30 @@ A8, and UV88 formats.
 - VTF format enum alignment with Source SDK *imageformat.h*.
   (ATI1N/ATI2N corrected to slots 38/37) ([i](https://github.com/ValveSoftware/source-sdk-2013/blob/88fa198fba3fb85d46d4c95018254693fdc3af0a/src/public/bitmap/imageformat.h)).
 
-## [0.4.0] | DMX, Clips and Metadata
+### [0.5.1]
 
-### [0.4.1]
+#### Added
+- VMT (Valve Material) fallback. When a material has no .vtf of its own, the viewer reads the
+  matching .vmt and follows its `$basetexture` reference (or `$iris` for Eye shader
+  materials, `$maintexture` as a last resort) to the real texture.
+- New vmt_parser.py module with a small KeyValues tokenizer that skips nested blocks
+  like Proxies and lowercases parameter names.
 
 #### Fixed
-- Removed duplicate `_build_vertex_weights` method in renderer.py that silently
-  overrode the proximity skin degenerate check.
-- Moved `self.skinning.set_rig()` call inside the `if model and model.bones:`
-  block in `set_model` to avoid calling it with None rig.
+- Out-of-range triangle indices could reach the GL index buffer on the textured draw
+  path. `_build_material_batches` now validates indices the same way `_build_indices` does.
+- DMX models with flipVCoordinates set had their V coordinate flipped twice. The model
+  now carries a `uv_pre_flipped` flag and the renderer skips its own flip in that case.
+- VTF 7.3+ files with a thumbnail decoded from a shifted offset. The low-res skip now
+  only applies to 7.2 and older, since 7.3+ stores the thumbnail as its own resource
+  and the high-res offset already points past it.
+- Replaced the fragile *locals()* check in `open_dmx_model` with an explicit message
+  variable initialized to *None*.
+- The clip dropdown now syncs with the renderer's current clip by matching user data,
+  so decorated labels like "ref (30 frames, 1.00s)" resolve correctly. `open_sequence`
+  stores the clip name as user data too for consistency.
 
-#### Changed
-- SMD `NODE_PATTERN` regex now captures full bone names with `(.*)` instead of
-  single character `(.)`.
+## [0.4.0] | DMX, Clips and Metadata
 
 ### Added
 - DMX multi-clip animation support with clip selector and metadata (duration, frame count, FPS).
@@ -193,6 +223,18 @@ A8, and UV88 formats.
 
 ### Removed
 - Dead code from the old renderer (inline posing, skinning).
+
+### [0.4.1]
+
+#### Fixed
+- Removed duplicate `_build_vertex_weights` method in renderer.py that silently
+  overrode the proximity skin degenerate check.
+- Moved `self.skinning.set_rig()` call inside the `if model and model.bones:`
+  block in `set_model` to avoid calling it with None rig.
+
+#### Changed
+- SMD `NODE_PATTERN` regex now captures full bone names with `(.*)` instead of
+  single character `(.)`.
 
 ## [0.3.0] | Lotta features and more
 

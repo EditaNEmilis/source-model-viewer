@@ -14,9 +14,110 @@ def is_mdl_file(path: str) -> bool:
     try:
         with open(path, "rb") as handle:
             magic = handle.read(4)
-        return magic == b"IDST"
+        return magic in (b"IDST", b"IDSQ")
     except OSError:
         return False
+
+
+def is_vmdl_c_file(path: str) -> bool:
+    # Source 2 compiled models (.vmdl_c) live in the Valve compiled
+    # resource container (file size at +0, block table at +16 with
+    # MRPH/MDAT/MBUF/PHYS/CTRL/RERL/REDI/DATA entries), not IDST.
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(64)
+        if len(data) < 32:
+            return False
+        if data[16:20] != b"MRPH":
+            return False
+        return b"MDAT" in data and b"MBUF" in data
+    except OSError:
+        return False
+
+
+def read_vmdl_c_info(path: str) -> dict:
+    """Best-effort inventory of a Source 2 compiled model (.vmdl_c).
+
+    Parses only the resource block table (exact) plus plain-text
+    references inside the RERL/REDI/DATA/MDAT blocks (material paths,
+    mesh markers). Vertex/index buffers (MBUF) and the KV3 payloads
+    still need a real KV3 + VBIB decoder before geometry can load, so
+    counts derived from binary markers are reported as estimates.
+    """
+    import re
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+
+    if len(data) < 32 or data[16:20] != b"MRPH":
+        raise MdlParseError("Not a Source 2 compiled resource file")
+
+    blocks = {}
+    for i in range(8):
+        off = 16 + i * 12
+        if off + 12 > len(data):
+            break
+        tag = data[off:off + 4].decode("ascii", errors="replace")
+        boff, bsize = struct.unpack_from("<2I", data, off + 4)
+        if 0 <= boff < len(data) and 0 < bsize <= len(data):
+            blocks[tag] = {"offset": boff, "size": min(bsize, len(data) - boff)}
+
+    def _block_strings(tag: str):
+        entry = blocks.get(tag)
+        if not entry:
+            return []
+        seg = data[entry["offset"]:entry["offset"] + entry["size"]]
+        return [
+            m.group(0).decode("utf-8", errors="replace")
+            for m in re.finditer(rb"[ -~]{5,}", seg)
+        ]
+
+    rerl_strings = _block_strings("RERL")
+    materials = sorted({s for s in rerl_strings if s.endswith(".vmat")})
+
+    redi_strings = _block_strings("REDI")
+    sources = sorted({
+        s for s in redi_strings
+        if s.endswith((".vmdl", ".dmx", ".vmdl_prefab"))
+    })
+
+    mdat_strings = _block_strings("MDAT")
+    mdat_raw = b""
+    if "MDAT" in blocks:
+        entry = blocks["MDAT"]
+        mdat_raw = data[entry["offset"]:entry["offset"] + entry["size"]]
+
+    model_name = ""
+    for s in _block_strings("DATA"):
+        if s.endswith(".vmdl"):
+            model_name = s
+            break
+
+    return {
+        "file_size": len(data),
+        "blocks": blocks,
+        "model_name": model_name,
+        "materials": materials,
+        "source_refs": sources,
+        "mesh_count_estimate": mdat_raw.count(b"CRenderMesh"),
+        "drawcall_count_estimate": len(
+            re.findall(rb"drawCall", mdat_raw)
+        ),
+        "data_string_count": len(_block_strings("DATA")),
+        # Measured MBUF layout on the sample file (offsets relative to
+        # the MBUF block start; see viewer/temp/mds notes). Float-like
+        # regions show u16-block maxima near 65535, index-like regions
+        # stay below ~23200. Positions are NOT plain f32 triples at
+        # these region starts, so a VBIB declaration parser is still
+        # required before geometry can be decoded.
+        "mbuf_map_measured": {
+            "float_like_a": {"range": [0, 335871], "u16_block_max": "~65535"},
+            "index_like_b": {"range": [335872, 471039], "u16_max": 22340},
+            "float_like_c": {"range": [471040, 629759], "u16_block_max": "~65535"},
+            "index_like_d": {"range": [629760, 683775], "u16_max": 5664},
+            "float_like_e": {"range": [683776, 704995], "u16_block_max": "~65535"},
+        },
+    }
 
 
 def _read_cstring(data: bytes, offset: int) -> str:
@@ -774,11 +875,29 @@ def parse_mdl(mdl_path: str) -> SmdModel:
     with open(mdl_path, "rb") as f:
         data = f.read()
 
+    if len(data) >= 32 and data[16:20] == b"MRPH":
+        if mdl_path.lower().endswith(".vmdl_c"):
+            from viewer.vmdl_parser import parse_vmdl_c
+            return parse_vmdl_c(mdl_path)
+        raise MdlParseError(
+            "Not a Source 1 MDL file: this is a Source 2 compiled resource "
+            "(.vmdl_c-style container with MRPH/MDAT/MBUF blocks). "
+            "Only .vmdl_c model files are supported; use a Source 1 "
+            "MDL/SMD/DMX file instead."
+        )
+
+    if len(data) >= 4 and data[:4] == b"IDSQ":
+        raise MdlParseError(
+            "This is an external GoldSrc animation library (IDSQ), not a "
+            "renderable model. Open the base model instead; its sequence "
+            "groups reference this file."
+        )
+
     if len(data) < 408:
         raise MdlParseError("MDL header too small")
 
     magic, version, checksum = struct.unpack_from("<3i", data, 0)
-    if magic != 0x54534449:  # 'IDST'
+    if magic not in (0x54534449, 0x51534449):  # 'IDST' or 'IDSQ'
         raise MdlParseError("Not a valid Source MDL file")
 
     if version < 25:
