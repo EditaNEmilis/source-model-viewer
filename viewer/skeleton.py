@@ -139,6 +139,49 @@ def lerp_vector3(a: Vector3, b: Vector3, amount: float) -> Vector3:
     )
 
 
+def quat_from_euler(euler: Vector3):
+    """Euler to quat matching euler_to_matrix (Rz * Ry * Rx)."""
+    rx, ry, rz = euler
+
+    cx = math.cos(rx * 0.5)
+    sx = math.sin(rx * 0.5)
+    cy = math.cos(ry * 0.5)
+    sy = math.sin(ry * 0.5)
+    cz = math.cos(rz * 0.5)
+    sz = math.sin(rz * 0.5)
+
+    ax, ay, az, aw = 0.0, 0.0, sz, cz
+    bx, by, bz, bw = 0.0, sy, 0.0, cy
+    cx_, cy_, cz_, cw_ = sx, 0.0, 0.0, cx
+
+    # (qz * qy) * qx
+    dx = aw * bx + ax * bw + ay * bz - az * by
+    dy = aw * by - ax * bz + ay * bw + az * bx
+    dz = aw * bz + ax * by - ay * bx + az * bw
+    dw = aw * bw - ax * bx - ay * by - az * bz
+
+    return (
+        dw * cx_ + dx * cw_ + dy * cz_ - dz * cy_,
+        dw * cy_ - dx * cz_ + dy * cw_ + dz * cx_,
+        dw * cz_ + dx * cy_ - dy * cx_ + dz * cw_,
+        dw * cw_ - dx * cx_ - dy * cy_ - dz * cz_,
+    )
+
+
+def slerp_rotation(a: Vector3, b: Vector3, amount: float) -> Vector3:
+    """Interpolate two euler rotations along the shortest rotational path.
+
+    Euler lerp swings the long way around whenever a channel crosses a
+    branch cut (wrapped spins, aliasing flips, gimbal-zone swings), which
+    reads as one-frame pops. Slerping in quat space follows the true
+    motion instead; converting back to euler keeps the Transform shape
+    unchanged for existing callers.
+    """
+    return quat_to_euler(
+        quat_slerp(quat_from_euler(a), quat_from_euler(b), amount)
+    )
+
+
 class SkeletonRig:
     def __init__(self, bones, reference_transforms: Dict[int, Transform]):
         self.bones = bones
@@ -305,7 +348,7 @@ class SkeletalAnimation:
             transform_b = b.get(bone_id, default)
 
             position = lerp_vector3(transform_a[0], transform_b[0], amount)
-            rotation = lerp_vector3(transform_a[1], transform_b[1], amount)
+            rotation = slerp_rotation(transform_a[1], transform_b[1], amount)
 
             result[bone_id] = (position, rotation)
 
@@ -339,7 +382,7 @@ class SkeletalAnimation:
             transform_b = b.get(bone_id, default)
 
             position = lerp_vector3(transform_a[0], transform_b[0], amount)
-            rotation = lerp_vector3(transform_a[1], transform_b[1], amount)
+            rotation = slerp_rotation(transform_a[1], transform_b[1], amount)
 
             result[bone_id] = (position, rotation)
 

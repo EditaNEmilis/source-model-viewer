@@ -190,6 +190,33 @@ def _bytes_per_pixel(fmt):
     return 4  # fallback
 
 
+def _is_sized_header(data: bytes) -> bool:
+    """True when a 7.0/7.1 file uses the sized 7.2 style header.
+
+    Beta era VTFs report version 7.0/7.1 but carry the regular
+    header (size field at 12, dimensions at 16, format at 52).
+    The legacy minimal layout has no size field, so route by
+    content: plausible header size plus power-of-two dimensions
+    and a known image format mean the sized layout.
+    """
+    if len(data) < 64:
+        return False
+    header_size, = struct.unpack_from("<I", data, 12)
+    if header_size not in (64, 80):
+        return False
+    width, height = struct.unpack_from("<HH", data, 16)
+    for dim in (width, height):
+        if dim < 1 or dim > 4096 or (dim & (dim - 1)):
+            return False
+    fmt, = struct.unpack_from("<i", data, 52)
+    if fmt not in FORMAT_NAMES:
+        return False
+    mips, = struct.unpack_from("<B", data, 56)
+    if not 1 <= mips <= 16:
+        return False
+    return True
+
+
 def parse_vtf(path: str) -> Tuple[VtfInfo, np.ndarray]:
     """
     Parse a VTF file and return (info, rgba_array).
@@ -214,7 +241,7 @@ def parse_vtf(path: str) -> Tuple[VtfInfo, np.ndarray]:
     info.version_major = version_major
     info.version_minor = version_minor
 
-    if version_minor <= 1:
+    if version_minor <= 1 and not _is_sized_header(data):
         # Very old format, minimal header
         info.width, info.height = struct.unpack_from("<HH", data, 12)
         info.flags, = struct.unpack_from("<I", data, 16)
@@ -251,8 +278,13 @@ def parse_vtf(path: str) -> Tuple[VtfInfo, np.ndarray]:
         info.low_res_format, = struct.unpack_from("<i", data, 57)
         info.low_res_width, = struct.unpack_from("<B", data, 61)
         info.low_res_height, = struct.unpack_from("<B", data, 62)
-        info.depth, = struct.unpack_from("<H", data, 63)
-        if info.depth == 0:
+        if version_minor >= 2:
+            info.depth, = struct.unpack_from("<H", data, 63)
+            if info.depth == 0:
+                info.depth = 1
+        else:
+            # 7.0/7.1 have no depth field (byte 63 is padding),
+            # so flat textures always have depth 1.
             info.depth = 1
 
         if version_minor >= 3:

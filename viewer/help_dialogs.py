@@ -91,8 +91,8 @@ def controls_html():
         ("Ctrl + M", "Reset model position"),
         ("Ctrl + Shift + R", "Reset camera and model"),
         ("F1", "Open this dialog"),
-        ("Clip dropdown", "Switch between animation clips (DMX, SMD, MDL, alpha MDL)"),
-        ("Sequence slider", "Scrub through skeletal animation (SMD, DMX, MDL, VMDL_C clips)"),
+        ("Clip dropdown", "Switch between animation clips (DMX, SMD, MDL, GoldSrc, beta probe)"),
+        ("Sequence slider", "Scrub through skeletal animation (SMD, DMX, MDL, GoldSrc, beta clips)"),
         ("Driver checkbox", "Let a driver bone control Intensity and Progress"),
     ]
 
@@ -115,8 +115,13 @@ def controls_html():
         "<code>Skel</code> applies skeletal deformation. "
         "<code>Driver</code> lets a driver bone control intensity and progress.</p>"
         "<p><code>Clip</code> selects an animation clip (DMX, SMD sequence, "
-        "compiled MDL sequence, or HL1 alpha sequence). "
+        "compiled MDL sequence, HL1 alpha sequence, or retail GoldSrc sequence). "
         "<code>Sequence</code> scrubs through the current skeletal animation.</p>"
+        "<h2>Viewport and Model</h2>"
+        "<p>Use <code>View</code> to toggle the ground grid, 3D axes, "
+        "material view (Textured, Solid Color, UV Checker), wireframe overlay, "
+        "and skeleton overlay. The same options live in "
+        "<code>File &gt; Settings...</code> (Ctrl+,) under Viewport and Model.</p>"
         "<h2>Materials and Textures</h2>"
         "<p>Compiled MDL models auto-mount their workshop or game materials directory. "
         "You can also manually set a directory via <code>File &gt; Set Materials Folder...</code> "
@@ -157,6 +162,10 @@ def animation_html():
         "tracks hold by frame number. Walk clips carry root motion, so the model "
         "may jump from the bind pose on frame 0, use <code>Ctrl+M</code> to "
         "recenter.</p>"
+        "<h2>GoldSrc retail notes</h2>"
+        "<p>Version 10 local sequences decode from compressed values with the "
+        "bone table base and scale. Only the first blend is used in 0.7.0. "
+        "Missing tracks hold the bind pose.</p>"
         "<h2>Driver bone</h2>"
         "<p>A bone such as <code>vertexAnimDriver</code> can drive a vertex animation. "
         "Its X position sets intensity from 0 to 1, and its Y position sets progress "
@@ -178,8 +187,8 @@ def formats_html():
         "bone hierarchy, bind pose, skin family 0 translation, and embedded "
         "8-bit palettized textures, including external <code>T.mdl</code> "
         "texture companion files (case-insensitive). Masked textures use binary "
-        "transparency. Retail sequence animation is not loaded yet. Those models "
-        "show their bind pose. External <code>IDSQ</code> animation libraries "
+        "transparency. Local sequence group 0 decodes to playable clips. "
+        "External <code>IDSQ</code> animation libraries "
         "explain themselves instead of failing to load.</p>"
         "<h2>HL1 alpha MDL (v6)</h2>"
         "<p>Half-Life 1 alpha models: 60-byte bones, shared texture entries, flat "
@@ -187,8 +196,9 @@ def formats_html():
         "a playable clip.</p>"
         "<h2>HL2 beta MDL (v37)</h2>"
         "<p>2001-2003 era builds: 64-byte vertices, 196-byte bones, 68-byte meshes, "
-        "and version 6 VTX strips. Geometry loads, but skeletal animation is not "
-        "implemented yet.</p>"
+        "and version 6 VTX strips. Geometry loads, including multi-bodypart "
+        "models. The 2002 sequence layout is still being worked out, so clips "
+        "stay unlisted instead of guessed.</p>"
         "<h2>Source 2 VMDL_C</h2>"
         "<p>Compiled Source 2 models: LZ4 + KV3 draw calls with VBIB-layout vertex/index "
         "buffers, positions, normals, UVs, and material names. Skeleton and blend "

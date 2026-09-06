@@ -19,9 +19,12 @@ from OpenGL.GL import (
     GL_GENERATE_MIPMAP,
     GL_LIGHT0,
     GL_LIGHTING,
+    GL_LINE,
+    GL_FILL,
     GL_LINEAR,
     GL_LINEAR_MIPMAP_LINEAR,
     GL_LINES,
+    GL_POINTS,
     GL_MODELVIEW,
     GL_MODULATE,
     GL_NORMALIZE,
@@ -57,6 +60,9 @@ from OpenGL.GL import (
     glLineWidth,
     glLoadIdentity,
     glMatrixMode,
+    glPointSize,
+    glPolygonMode,
+    glPolygonOffset,
     glPopMatrix,
     glPushMatrix,
     glRotatef,
@@ -71,7 +77,7 @@ from OpenGL.GLU import gluPerspective
 from viewer.camera import Camera
 from viewer.mesh_buffers import MeshBuffers
 from viewer.pose import VertexAnimator
-from viewer.skeleton import SkeletonRig, SkeletalAnimation
+from viewer.skeleton import SkeletonRig, SkeletalAnimation, evaluate_world_matrices
 from viewer.skinning import Skinning
 from viewer.vtf_parser import parse_vtf, VtfError
 from viewer.vmt_parser import parse_vmt, VmtParseError
@@ -83,6 +89,10 @@ class Renderer:
         self.width = 1
         self.height = 1
         self.show_grid = True
+        self.show_axes = True
+        self.view_mode = "textured"
+        self.wireframe_overlay = False
+        self.show_skeleton = False
 
         self.camera = Camera()
         self.animator = VertexAnimator()
@@ -140,27 +150,6 @@ class Renderer:
     def paint(self):
         if self.width <= 0 or self.height <= 0:
             return
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        aspect = self.width / float(self.height)
-        gluPerspective(self.camera.fov, aspect, self.camera.near, self.camera.far)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.4, 1.0, 0.0))
-        self.camera.apply()
-        self._draw_grid()
-        self._draw_model()
-
-    def set_background_color(self, r, g, b, a=1.0):
-        self.background_color = (float(r), float(g), float(b), float(a))
-
-    def set_show_grid(self, enabled):
-        self.show_grid = bool(enabled)
-
-    def paint(self):
-        if self.width <= 0 or self.height <= 0:
-            return
         glClearColor(*self.background_color)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glMatrixMode(GL_PROJECTION)
@@ -173,7 +162,30 @@ class Renderer:
         self.camera.apply()
         if self.show_grid:
             self._draw_grid()
+        if self.show_axes:
+            self._draw_axes()
         self._draw_model()
+        if self.show_skeleton:
+            self._draw_skeleton()
+
+    def set_background_color(self, r, g, b, a=1.0):
+        self.background_color = (float(r), float(g), float(b), float(a))
+
+    def set_show_grid(self, enabled):
+        self.show_grid = bool(enabled)
+
+    def set_show_axes(self, enabled):
+        self.show_axes = bool(enabled)
+
+    def set_model_view_mode(self, mode):
+        if mode in ("textured", "solid", "uv_checker"):
+            self.view_mode = mode
+
+    def set_wireframe(self, enabled):
+        self.wireframe_overlay = bool(enabled)
+
+    def set_show_skeleton(self, enabled):
+        self.show_skeleton = bool(enabled)
 
     # ------------------------------------------------------------------
     # Model loading
@@ -278,6 +290,13 @@ class Renderer:
                 glDeleteTextures(1, [tex_id])
         self.texture_cache = {}
         self.material_props = {}
+        checker_id = getattr(self, "_checker_tex", None)
+        if checker_id:
+            try:
+                glDeleteTextures(1, [checker_id])
+            except Exception:
+                pass
+            self._checker_tex = None
 
     def _resolve_path(self, name, ext):
         if not name:
@@ -590,6 +609,10 @@ class Renderer:
             return
         weights = self._build_vertex_weights(self.model)
         self.skinning.set_rig(self.rig, weights)
+        # set_rig clears the cached skin matrices. Reapply the current
+        # frame so the viewport keeps showing the posed model instead of
+        # snapping back to the unposed shape until playback resumes.
+        self.skinning.set_frame(self.skinning.frame)
 
     def _build_vertex_weights(self, model):
         parsed = []
@@ -1097,6 +1120,16 @@ class Renderer:
             glVertex3f(base_x + offset, base_y + extent, base_z)
             glVertex3f(base_x - extent, base_y + offset, base_z)
             glVertex3f(base_x + extent, base_y + offset, base_z)
+        glEnd()
+
+    def _draw_axes(self):
+        glDisable(GL_LIGHTING)
+        glLineWidth(2.0)
+        base_x = self.model_center[0]
+        base_y = self.model_center[1]
+        base_z = self.model_center[2]
+        extent = max(10.0, self.camera.radius * 2.0)
+        glBegin(GL_LINES)
         glColor3f(0.75, 0.25, 0.25)
         glVertex3f(base_x, base_y, base_z)
         glVertex3f(base_x + extent, base_y, base_z)
@@ -1107,6 +1140,76 @@ class Renderer:
         glVertex3f(base_x, base_y, base_z)
         glVertex3f(base_x, base_y, base_z + extent)
         glEnd()
+        glLineWidth(1.0)
+
+    def _get_checker_texture(self):
+        tex_id = getattr(self, "_checker_tex", None)
+        if tex_id:
+            return tex_id
+        size = 128
+        tile = 16
+        rgba = np.zeros((size, size, 4), dtype=np.uint8)
+        for y in range(size):
+            for x in range(size):
+                on = ((x // tile) + (y // tile)) % 2 == 0
+                if on:
+                    rgba[y, x] = (200, 200, 200, 255)
+                else:
+                    rgba[y, x] = (80, 80, 90, 255)
+        tex_id = self._upload_rgba_texture(rgba)
+        self._checker_tex = tex_id
+        return tex_id
+
+    def _draw_skeleton(self):
+        if self.rig is None:
+            return
+        try:
+            if self.skeletal_animation is not None:
+                locals_map = self.skeletal_animation.sample(self.skinning.frame)
+            else:
+                locals_map = dict(self.rig.bind_local)
+            worlds = evaluate_world_matrices(self.rig, locals_map)
+        except Exception:
+            return
+        points = {}
+        for bone_id, mat in worlds.items():
+            points[bone_id] = (mat[3], mat[7], mat[11])
+        if not points:
+            return
+        glDisable(GL_LIGHTING)
+        glDisable(GL_TEXTURE_2D)
+        # Skeleton is an overlay: ignore depth so bones stay visible
+        # through the mesh instead of hiding inside it.
+        glDisable(GL_DEPTH_TEST)
+        glPushMatrix()
+        glTranslatef(
+            self.model_position[0],
+            self.model_position[1],
+            self.model_position[2],
+        )
+        glRotatef(self.model_rotation[0], 1.0, 0.0, 0.0)
+        glRotatef(self.model_rotation[1], 0.0, 1.0, 0.0)
+        glRotatef(self.model_rotation[2], 0.0, 0.0, 1.0)
+        glLineWidth(2.0)
+        glBegin(GL_LINES)
+        glColor3f(1.0, 0.8, 0.2)
+        for bone_id in self.rig.bone_ids:
+            parent_id = self.rig.parent.get(bone_id, -1)
+            if parent_id in points and bone_id in points:
+                glVertex3f(*points[parent_id])
+                glVertex3f(*points[bone_id])
+        glEnd()
+        glPointSize(5.0)
+        glBegin(GL_POINTS)
+        glColor3f(1.0, 0.4, 0.2)
+        for bone_id in self.rig.bone_ids:
+            if bone_id in points:
+                glVertex3f(*points[bone_id])
+        glEnd()
+        glPointSize(1.0)
+        glLineWidth(1.0)
+        glPopMatrix()
+        glEnable(GL_DEPTH_TEST)
 
     def _draw_model(self):
         if (
@@ -1146,9 +1249,17 @@ class Renderer:
         glRotatef(self.model_rotation[1], 0.0, 1.0, 0.0)
         glRotatef(self.model_rotation[2], 0.0, 0.0, 1.0)
 
+        use_checker = self.view_mode == "uv_checker"
+        use_solid = self.view_mode == "solid"
+        checker_id = None
+        if use_checker and self.mesh.has_texcoords:
+            try:
+                checker_id = self._get_checker_texture()
+            except Exception:
+                checker_id = None
+
         if self._material_batches and self.mesh.has_texcoords:
             for mat_name, offset, count in self._material_batches:
-                tex_id = self._load_material_texture(mat_name)
                 props = self.material_props.get(mat_name, {})
 
                 if props.get("nodraw"):
@@ -1168,6 +1279,24 @@ class Renderer:
                 else:
                     glEnable(GL_LIGHTING)
 
+                if use_solid:
+                    glDisable(GL_TEXTURE_2D)
+                    self.mesh.draw_range(offset, count, with_texcoords=False, with_colors=True)
+                    continue
+
+                if use_checker and checker_id:
+                    glEnable(GL_LIGHTING)
+                    glColor4f(1.0, 1.0, 1.0, 1.0)
+                    glEnable(GL_TEXTURE_2D)
+                    glBindTexture(GL_TEXTURE_2D, checker_id)
+                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+                    self.mesh.draw_range(offset, count, with_texcoords=True, with_colors=False)
+                    glBindTexture(GL_TEXTURE_2D, 0)
+                    glDisable(GL_TEXTURE_2D)
+                    continue
+
+                tex_id = self._load_material_texture(mat_name)
+
                 # Apply color tint
                 color = props.get("color", (1.0, 1.0, 1.0, 1.0))
                 glColor4f(*color)
@@ -1181,6 +1310,19 @@ class Renderer:
                     glDisable(GL_TEXTURE_2D)
                 else:
                     self.mesh.draw_range(offset, count, with_texcoords=False, with_colors=True)
+        else:
+            glDisable(GL_TEXTURE_2D)
+            glEnable(GL_LIGHTING)
+            self.mesh.draw(with_texcoords=False, with_colors=True)
+
+        if self.wireframe_overlay:
+            glDisable(GL_LIGHTING)
+            glDisable(GL_TEXTURE_2D)
+            glColor4f(0.1, 0.1, 0.1, 1.0)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            glLineWidth(1.0)
+            self.mesh.draw(with_texcoords=False, with_colors=False)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
         glPopMatrix()
         glDisable(GL_ALPHA_TEST)

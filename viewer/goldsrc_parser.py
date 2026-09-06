@@ -639,6 +639,186 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
     return model
 
 
+def _decode_animvalue_channel(data: bytes, pos: int, numframes: int):
+    # GoldSrc mstudioanimvalue_t RLE chain covering numframes.
+    # Each span is 2 bytes valid/total plus valid shorts.
+    # Returns a list of raw short values per frame.
+    out = []
+    used = 0
+    limit = len(data)
+    guard = 0
+    while len(out) < numframes and guard < 4096:
+        guard += 1
+        if pos + used + 2 > limit:
+            break
+        valid = data[pos + used]
+        total = data[pos + used + 1]
+        used += 2
+        if total == 0:
+            break
+        vals = []
+        for _ in range(valid):
+            if pos + used + 2 > limit:
+                break
+            (v,) = struct.unpack_from("<h", data, pos + used)
+            used += 2
+            vals.append(v)
+        if not vals:
+            vals = [0]
+        for k in range(total):
+            if len(out) >= numframes:
+                break
+            if k < len(vals):
+                out.append(vals[k])
+            else:
+                out.append(vals[-1])
+    while len(out) < numframes:
+        out.append(out[-1] if out else 0)
+    return out[:numframes]
+
+
+def _retail_seq_descs(data: bytes, numseq: int, seqindex: int):
+    # Retail v10 mstudioseqdesc_t is 176 bytes. Fields used here:
+    # label[32], fps +32, flags +36, numevents +48, eventindex +52,
+    # numframes +56, numpivots +60, pivotindex +64, numblends +120,
+    # animindex +124, seqgroup +132. Offsets are absolute file offsets.
+    descs = []
+    if numseq < 1 or seqindex <= 0:
+        return descs
+    for s in range(max(0, min(numseq, 1024))):
+        entry = seqindex + s * 176
+        if entry + 176 > len(data):
+            break
+        try:
+            raw_label = data[entry:entry + 32]
+            (fps,) = struct.unpack_from("<f", data, entry + 32)
+            (flags,) = struct.unpack_from("<i", data, entry + 36)
+            (numframes,) = struct.unpack_from("<i", data, entry + 56)
+            (numblends,) = struct.unpack_from("<i", data, entry + 120)
+            (animindex,) = struct.unpack_from("<i", data, entry + 124)
+            (seqgroup,) = struct.unpack_from("<i", data, entry + 132)
+        except struct.error:
+            break
+        name = _read_name(raw_label) or f"seq_{s}"
+        if not 0 < numframes <= 4096:
+            continue
+        if numblends < 1:
+            numblends = 1
+        descs.append({
+            "name": name,
+            "fps": fps if fps > 0.0 else 30.0,
+            "flags": flags,
+            "numframes": numframes,
+            "numblends": min(numblends, 8),
+            "animindex": animindex,
+            "seqgroup": seqgroup,
+        })
+    return descs
+
+
+def _retail_animation_clips(data: bytes, bones, bind_transforms, bone_scales,
+                            numseq: int, seqindex: int):
+    # Returns (clips, error). Clips follow the shared
+    # renderer.set_animation_clips convention: (name, SmdModel) pairs
+    # with frame_rate, duration, name, looping in metadata. Only the
+    # first blend of local seqgroup 0 is decoded for 0.7.0. Missing or
+    # external tracks hold the bind pose.
+    clips = []
+    error = ""
+    descs = _retail_seq_descs(data, numseq, seqindex)
+    if not descs:
+        return clips, error
+    external = [d["name"] for d in descs if d["seqgroup"] != 0]
+    if external:
+        error = (
+            f"{len(external)} sequence(s) live in external seqgroups "
+            "and use the bind pose"
+        )
+    identity_pos = (0.0, 0.0, 0.0)
+    identity_rot = (0.0, 0.0, 0.0)
+    for desc in descs:
+        if desc["seqgroup"] != 0:
+            continue
+        numframes = desc["numframes"]
+        anim_base = desc["animindex"]
+        if not 0 < anim_base < len(data):
+            continue
+        # First blend only. Each bone has one 12 byte mstudioanim_t
+        # with 6 unsigned short offsets relative to its own entry.
+        # Channels 0..2 are position, 3..5 rotation, in the same units
+        # as the bone table bind values.
+        per_bone_frames = []
+        ok = True
+        for i in range(len(bones)):
+            entry = anim_base + i * 12
+            if entry + 12 > len(data):
+                ok = False
+                break
+            try:
+                offsets = struct.unpack_from("<6H", data, entry)
+            except struct.error:
+                ok = False
+                break
+            bind_pos, bind_rot = bind_transforms.get(i, (identity_pos, identity_rot))
+            base_vals = (bind_pos[0], bind_pos[1], bind_pos[2],
+                         bind_rot[0], bind_rot[1], bind_rot[2])
+            scales = bone_scales.get(i, (1.0,) * 6)
+            channels = []
+            for c in range(6):
+                off = offsets[c]
+                if off == 0:
+                    channels.append(None)
+                else:
+                    start = entry + off
+                    if not 0 < start < len(data):
+                        channels.append(None)
+                    else:
+                        try:
+                            channels.append(
+                                _decode_animvalue_channel(data, start, numframes)
+                            )
+                        except Exception:
+                            channels.append(None)
+            per_bone_frames.append((base_vals, scales, channels))
+        if not ok or not per_bone_frames:
+            continue
+        frames = []
+        for f in range(numframes):
+            transforms = {}
+            for i, (base_vals, scales, channels) in enumerate(per_bone_frames):
+                vals = list(base_vals)
+                for c in range(6):
+                    ch = channels[c]
+                    if ch is None:
+                        continue
+                    try:
+                        raw = ch[f]
+                    except IndexError:
+                        continue
+                    try:
+                        vals[c] = base_vals[c] + float(raw) * float(scales[c])
+                    except Exception:
+                        continue
+                pos = (float(vals[0]), float(vals[1]), float(vals[2]))
+                rot = (float(vals[3]), float(vals[4]), float(vals[5]))
+                if all(math.isfinite(v) for v in pos + rot):
+                    transforms[i] = (pos, rot)
+                else:
+                    transforms[i] = bind_transforms.get(i, (identity_pos, identity_rot))
+            frames.append(SmdFrame(time=f, transforms=transforms))
+        if not frames:
+            continue
+        clip = SmdModel(version=1, bones=list(bones), frames=frames)
+        clip.metadata.update({
+            "frame_rate": desc["fps"],
+            "duration": numframes / desc["fps"] if desc["fps"] > 0 else 0.0,
+            "name": desc["name"],
+            "looping": bool(desc["flags"] & 0x1),
+        })
+        clips.append((desc["name"], clip))
+    return clips, error
+
+
 def _load_textures(texture_data: bytes, numtextures: int, textureindex: int):
     entries = []
 
@@ -714,16 +894,22 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
 
     bones = []
     bind_transforms = {}
+    bone_scales = {}
 
     for i in range(numbones):
         b_offset = boneindex + i * 112
         raw_name, parent = struct.unpack_from("<32si", data, b_offset)
         pos = struct.unpack_from("<3f", data, b_offset + 64)
         rot = struct.unpack_from("<3f", data, b_offset + 76)
+        try:
+            scales = struct.unpack_from("<6f", data, b_offset + 88)
+        except struct.error:
+            scales = (1.0,) * 6
 
         name = _read_name(raw_name) or f"bone_{i}"
         bones.append(SmdBone(bone_id=i, name=name, parent_id=parent))
         bind_transforms[i] = (pos, rot)
+        bone_scales[i] = tuple(float(s) for s in scales)
 
     # GoldSrc stores vertices and normals in bone-local space; the engine
     # transforms each by its bone matrix at render time. Bake the bind pose
@@ -948,5 +1134,20 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
         model.has_geometry = True
         model.min_bound = tuple(min_bound)
         model.max_bound = tuple(max_bound)
+
+    try:
+        clips, anim_error = _retail_animation_clips(
+            data, bones, bind_transforms, bone_scales, numseq, seqindex
+        )
+        if clips:
+            model.metadata["animation_clips"] = clips
+            model.has_animation = True
+        if anim_error:
+            prev = model.metadata.get("animation_error", "")
+            model.metadata["animation_error"] = (
+                f"{prev}; {anim_error}" if prev else anim_error
+            )
+    except Exception as error:
+        model.metadata["animation_error"] = str(error)
 
     return model

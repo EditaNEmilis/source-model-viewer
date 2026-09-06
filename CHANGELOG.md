@@ -2,6 +2,28 @@
 
 Changelog of each versions.
 
+## [0.7.0] | Improvement works
+
+### Added
+- Viewport toggles for ground grid and 3D axes, available in the View menu and the Viewport settings tab with persistence.
+- Model settings tab with material view modes (Textured, Solid Color, UV Checker), wireframe overlay, and skeleton overlay.
+- Skeleton overlay draws bones and joints from the current clip pose with bind pose fallback, on top of the mesh with depth testing off.
+- Retail GoldSrc v10 sequence decoding: local seqgroup 0 blends decode to playable clips with fps and looping flags. External seqgroup clips report a status note and hold the bind pose.
+- HL2 beta v37 rotation decoding: 92 byte animation records off the 0xB4 header slot decode per-bone RLE rotation tracks (entry-relative offsets, bind pose plus raw times bone rot scale).
+- HL2 beta clip names: single-animation sequences from the 0xCC table name their animation explicitly, and the file's a_ name pool is used positionally for its leading run once it validates against those sequence names (Alyx 280/341, c17 187/187). Anything unnamed stays anim_N.
+
+### Fixed
+- Removed the dead duplicate paint path so background color and grid toggles apply reliably.
+- Fixed the File menu duplicate materials entry and double separator.
+- Split grid and axis drawing so each toggle controls one pass.
+- Applying Settings no longer snaps a posed model back to its rest shape. Weight rebuilds keep the current skeletal frame, so playback resumes where it was.
+- HL2 beta multi-bodypart models load every part. The bodypart table base and the VTX topology now come from the real model slots, and strip matching retries while dropping one unmatched part so a missing variant cannot hide the rest. c17 citizen bodies load with the head again.
+- Beta animation search requires plausible bone data before trusting a table, so stray text matches no longer surface as bogus clips.
+- Materials auto-mount now also walks up from the model's folder, so a materials/ dir next to it or a few levels above is found (temp/materials for a model in temp/model). Beta texture lookup previously mounted nothing and models rendered untextured.
+- Beta era VTFs (version 7.0/7.1 with the sized header) decode through the standard header layout instead of the legacy minimal one, which misread dimensions and the image format. All 35 Alyx VTFs decode.
+- Beta models now report their used material names instead of an empty set.
+- Internal cleanup: the 850 line beta animation decoder is now a short orchestration pass over focused helpers (naming, bind pose, enumeration, grouping, pairing, collection, attribution, decode), verified byte identical on all four models. Also removed a dead run predicate and the unused slot bookkeeping.
+
 ## [0.6.0] | MDL and Preferences
 
 ### Added

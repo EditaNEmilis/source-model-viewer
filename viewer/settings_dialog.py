@@ -143,6 +143,12 @@ class SettingsDialog(QDialog):
         )
         view_form.addRow(self.show_grid_check)
 
+        self.show_axes_check = QCheckBox("Show 3D Axes")
+        self.show_axes_check.setChecked(
+            self.settings.value("viewport/show_axes", True, type=bool)
+        )
+        view_form.addRow(self.show_axes_check)
+
         self.bg_color_btn = QPushButton()
         self.bg_color = QColor(
             self.settings.value("viewport/bg_color", "#1a1a1c", type=str)
@@ -192,6 +198,38 @@ class SettingsDialog(QDialog):
         anim_layout.addStretch()
         tabs.addTab(anim_tab, "Defaults")
 
+        # Tab 4: Model display
+        model_tab = QWidget()
+        model_layout = QVBoxLayout(model_tab)
+
+        model_group = QGroupBox("Model Display")
+        model_form = QFormLayout(model_group)
+
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItems(["Textured", "Solid Color", "UV Checker"])
+        view_mode_raw = self.settings.value("model/view_mode", "textured", type=str)
+        view_mode_index = {"textured": 0, "solid": 1, "uv_checker": 2}.get(
+            str(view_mode_raw), 0
+        )
+        self.view_mode_combo.setCurrentIndex(view_mode_index)
+        model_form.addRow("Material View:", self.view_mode_combo)
+
+        self.wireframe_check = QCheckBox("Wireframe Overlay")
+        self.wireframe_check.setChecked(
+            self.settings.value("model/wireframe", False, type=bool)
+        )
+        model_form.addRow(self.wireframe_check)
+
+        self.skeleton_check = QCheckBox("Show Skeleton")
+        self.skeleton_check.setChecked(
+            self.settings.value("model/show_skeleton", False, type=bool)
+        )
+        model_form.addRow(self.skeleton_check)
+
+        model_layout.addWidget(model_group)
+        model_layout.addStretch()
+        tabs.addTab(model_tab, "Model")
+
         layout.addWidget(tabs, 1)
 
         # Buttons
@@ -232,12 +270,19 @@ class SettingsDialog(QDialog):
         self.settings.setValue("materials/filter_mode", self.filter_combo.currentIndex())
 
         self.settings.setValue("viewport/show_grid", self.show_grid_check.isChecked())
+        self.settings.setValue("viewport/show_axes", self.show_axes_check.isChecked())
         self.settings.setValue("viewport/bg_color", self.bg_color.name())
         self.settings.setValue("viewport/fov", self.fov_spin.value())
 
         self.settings.setValue("defaults/fps", self.default_fps_spin.value())
         self.settings.setValue("defaults/culling", self.culling_default_check.isChecked())
         self.settings.setValue("defaults/proximity_skin", self.proximity_default_check.isChecked())
+
+        view_modes = ["textured", "solid", "uv_checker"]
+        view_index = max(0, min(self.view_mode_combo.currentIndex(), 2))
+        self.settings.setValue("model/view_mode", view_modes[view_index])
+        self.settings.setValue("model/wireframe", self.wireframe_check.isChecked())
+        self.settings.setValue("model/show_skeleton", self.skeleton_check.isChecked())
 
         self.settings.sync()
         self.accept()

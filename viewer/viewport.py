@@ -111,6 +111,26 @@ class Viewport(QOpenGLWidget):
         self.renderer.set_backface_culling(enabled)
         self.update()
 
+    def set_show_grid(self, enabled):
+        self.renderer.set_show_grid(enabled)
+        self.update()
+
+    def set_show_axes(self, enabled):
+        self.renderer.set_show_axes(enabled)
+        self.update()
+
+    def set_model_view_mode(self, mode):
+        self.renderer.set_model_view_mode(mode)
+        self.update()
+
+    def set_wireframe(self, enabled):
+        self.renderer.set_wireframe(enabled)
+        self.update()
+
+    def set_show_skeleton(self, enabled):
+        self.renderer.set_show_skeleton(enabled)
+        self.update()
+
     def animation_mode(self):
         return self.renderer.animation_mode()
 

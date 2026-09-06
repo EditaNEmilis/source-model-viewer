@@ -258,6 +258,42 @@ class MainWindow(QMainWindow):
         )
         self.proximity_skin_action.triggered.connect(self.toggle_proximity_skin)
 
+        self.show_grid_action = QAction("Show Ground Grid", self)
+        self.show_grid_action.setCheckable(True)
+        self.show_grid_action.setChecked(True)
+        self.show_grid_action.setStatusTip("Toggle the ground grid")
+        self.show_grid_action.triggered.connect(self.toggle_grid)
+
+        self.show_axes_action = QAction("Show 3D Axes", self)
+        self.show_axes_action.setCheckable(True)
+        self.show_axes_action.setChecked(True)
+        self.show_axes_action.setStatusTip("Toggle the red green blue axis lines")
+        self.show_axes_action.triggered.connect(self.toggle_axes)
+
+        self.wireframe_action = QAction("Wireframe Overlay", self)
+        self.wireframe_action.setCheckable(True)
+        self.wireframe_action.setChecked(False)
+        self.wireframe_action.setStatusTip("Draw a wireframe overlay on the model")
+        self.wireframe_action.triggered.connect(self.toggle_wireframe)
+
+        self.skeleton_action = QAction("Show Skeleton", self)
+        self.skeleton_action.setCheckable(True)
+        self.skeleton_action.setChecked(False)
+        self.skeleton_action.setStatusTip("Draw bones and joints in the 3D view")
+        self.skeleton_action.triggered.connect(self.toggle_skeleton)
+
+        self.solid_view_action = QAction("Solid Color View", self)
+        self.solid_view_action.setCheckable(True)
+        self.solid_view_action.setChecked(False)
+        self.solid_view_action.setStatusTip("Ignore textures and show flat material colors")
+        self.solid_view_action.triggered.connect(self.toggle_solid_view)
+
+        self.uv_checker_action = QAction("UV Checker View", self)
+        self.uv_checker_action.setCheckable(True)
+        self.uv_checker_action.setChecked(False)
+        self.uv_checker_action.setStatusTip("Show a checker pattern for UV inspection")
+        self.uv_checker_action.triggered.connect(self.toggle_uv_checker)
+
         self.materials_folder_action = QAction("Set &Materials Folder...", self)
         self.materials_folder_action.setShortcut("Ctrl+Shift+M")
         self.materials_folder_action.setStatusTip(
@@ -272,18 +308,25 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.open_flex_info_action)
         file_menu.addAction(self.materials_folder_action)
         file_menu.addSeparator()
-        file_menu.addSeparator()
         file_menu.addAction(self.clear_animation_action)
         file_menu.addAction(self.clear_sequence_action)
         file_menu.addSeparator()
-        file_menu.addAction(self.exit_action)
-        file_menu.addAction(self.materials_folder_action)
         file_menu.addAction(self.settings_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.reset_camera_action)
         view_menu.addAction(self.reset_model_action)
         view_menu.addAction(self.reset_all_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.show_grid_action)
+        view_menu.addAction(self.show_axes_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.solid_view_action)
+        view_menu.addAction(self.uv_checker_action)
+        view_menu.addAction(self.wireframe_action)
+        view_menu.addAction(self.skeleton_action)
         view_menu.addSeparator()
         view_menu.addAction(self.auto_match_action)
         view_menu.addAction(self.culling_action)
@@ -735,6 +778,17 @@ class MainWindow(QMainWindow):
             self.viewport.renderer.add_material_directory(direct_candidate)
             return direct_candidate
 
+        # Walk up from the model's folder: a materials/ dir next to it
+        # or a few levels above (e.g. temp/materials for a model in
+        # temp/model) is the model's material set.
+        parent = os.path.dirname(os.path.abspath(file_path))
+        for _ in range(6):
+            parent = os.path.dirname(parent)
+            candidate = os.path.join(parent, "materials")
+            if os.path.isdir(candidate):
+                self.viewport.renderer.add_material_directory(candidate)
+                return candidate
+
         return None
 
     def _try_auto_flex_info(self, file_path):
@@ -878,6 +932,44 @@ class MainWindow(QMainWindow):
 
     def toggle_culling(self):
         self.viewport.set_backface_culling(self.culling_action.isChecked())
+
+    def toggle_grid(self):
+        self.viewport.set_show_grid(self.show_grid_action.isChecked())
+
+    def toggle_axes(self):
+        self.viewport.set_show_axes(self.show_axes_action.isChecked())
+
+    def toggle_wireframe(self):
+        self.viewport.set_wireframe(self.wireframe_action.isChecked())
+
+    def toggle_skeleton(self):
+        self.viewport.set_show_skeleton(self.skeleton_action.isChecked())
+
+    def toggle_solid_view(self):
+        if self.solid_view_action.isChecked():
+            self.uv_checker_action.blockSignals(True)
+            self.uv_checker_action.setChecked(False)
+            self.uv_checker_action.blockSignals(False)
+            self.viewport.set_model_view_mode("solid")
+        else:
+            self.viewport.set_model_view_mode("textured")
+
+    def toggle_uv_checker(self):
+        if self.uv_checker_action.isChecked():
+            self.solid_view_action.blockSignals(True)
+            self.solid_view_action.setChecked(False)
+            self.solid_view_action.blockSignals(False)
+            self.viewport.set_model_view_mode("uv_checker")
+        else:
+            self.viewport.set_model_view_mode("textured")
+
+    def _apply_view_mode_actions(self, mode):
+        self.solid_view_action.blockSignals(True)
+        self.uv_checker_action.blockSignals(True)
+        self.solid_view_action.setChecked(mode == "solid")
+        self.uv_checker_action.setChecked(mode == "uv_checker")
+        self.solid_view_action.blockSignals(False)
+        self.uv_checker_action.blockSignals(False)
 
     def toggle_proximity_skin(self):
         enabled = self.proximity_skin_action.isChecked()
@@ -1296,6 +1388,11 @@ class MainWindow(QMainWindow):
 
         show_grid = settings.value("viewport/show_grid", True, type=bool)
         self.viewport.renderer.set_show_grid(show_grid)
+        self.show_grid_action.setChecked(show_grid)
+
+        show_axes = settings.value("viewport/show_axes", True, type=bool)
+        self.viewport.renderer.set_show_axes(show_axes)
+        self.show_axes_action.setChecked(show_axes)
 
         fov = settings.value("viewport/fov", 45, type=int)
         self.viewport.renderer.camera.fov = fov
@@ -1316,6 +1413,20 @@ class MainWindow(QMainWindow):
         proximity = settings.value("defaults/proximity_skin", False, type=bool)
         self.proximity_skin_action.setChecked(proximity)
         self.viewport.set_proximity_skin(proximity)
+
+        view_mode = str(settings.value("model/view_mode", "textured", type=str))
+        if view_mode not in ("textured", "solid", "uv_checker"):
+            view_mode = "textured"
+        self.viewport.set_model_view_mode(view_mode)
+        self._apply_view_mode_actions(view_mode)
+
+        wireframe = settings.value("model/wireframe", False, type=bool)
+        self.wireframe_action.setChecked(wireframe)
+        self.viewport.set_wireframe(wireframe)
+
+        show_skeleton = settings.value("model/show_skeleton", False, type=bool)
+        self.skeleton_action.setChecked(show_skeleton)
+        self.viewport.set_show_skeleton(show_skeleton)
 
         self.viewport.update()
 
