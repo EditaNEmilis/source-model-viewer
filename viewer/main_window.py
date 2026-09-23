@@ -359,35 +359,82 @@ class MainWindow(QMainWindow):
 
         return details
 
+    def _clip_display_label(self, index, clip_name, clip_model, duplicate_name):
+        metadata = getattr(clip_model, "metadata", {}) or {}
+        frames = len(clip_model.frames) if clip_model.frames else 0
+        try:
+            duration = float(metadata.get("duration", 0.0))
+        except (TypeError, ValueError):
+            duration = 0.0
+
+        try:
+            sequence_group = int(metadata.get("sequence_group", 0) or 0)
+        except (TypeError, ValueError):
+            sequence_group = 0
+        try:
+            blend_count = max(1, int(metadata.get("blend_count", 1) or 1))
+            blend_index = max(0, int(metadata.get("blend_index", 0) or 0))
+        except (TypeError, ValueError):
+            blend_count = 1
+            blend_index = 0
+
+        qualifiers = []
+        if sequence_group > 0:
+            qualifiers.append(f"group {sequence_group}")
+        if blend_count > 1:
+            qualifiers.append(f"blend {blend_index + 1}/{blend_count}")
+        if metadata.get("fallback"):
+            qualifiers.append("bind pose")
+        if duplicate_name:
+            qualifiers.append(f"clip {index + 1}")
+
+        label = clip_name
+        if qualifiers:
+            label += " [" + ", ".join(qualifiers) + "]"
+        return f"{label} ({frames} frames, {duration:.2f}s)"
+
+    def _set_animation_clips(self, clips):
+        clips = list(clips) if clips else []
+        self._clip_models = clips
+        self.viewport.set_animation_clips(clips)
+
+        name_counts = {}
+        for clip_name, _ in clips:
+            key = clip_name.casefold()
+            name_counts[key] = name_counts.get(key, 0) + 1
+
+        self.clip_combo.blockSignals(True)
+        self.clip_combo.clear()
+        for index, (clip_name, clip_model) in enumerate(clips):
+            duplicate_name = name_counts.get(clip_name.casefold(), 0) > 1
+            label = self._clip_display_label(
+                index, clip_name, clip_model, duplicate_name
+            )
+            self.clip_combo.addItem(label, index)
+        if clips:
+            self.clip_combo.setCurrentIndex(0)
+        self.clip_combo.setEnabled(bool(clips))
+        self.clip_combo.blockSignals(False)
+
+        self.sequence_slider.blockSignals(True)
+        self.sequence_slider.setValue(0)
+        self.sequence_slider.blockSignals(False)
+
+        self.stop_playback()
+        self.update_animation_ui()
+
     def _display_compiled_model(self, parsed, file_path):
         # Shared post-parse handling for compiled models (Source 1 MDL
         # and Source 2 .vmdl_c): mount materials, push to the viewport,
         # wire animation clips, and report the load in the status bar.
         auto_mat = self._auto_add_materials_root(file_path)
 
+        self._set_animation_clips([])
         self.viewport.set_model(parsed)
         self.viewport.set_animation_targets([])
 
         clips = parsed.metadata.get("animation_clips") or []
-        if clips:
-            self._clip_models = clips
-            self.viewport.set_animation_clips(clips)
-            self.clip_combo.clear()
-            for clip_name, clip_model in clips:
-                meta = clip_model.metadata
-                frames = len(clip_model.frames) if clip_model.frames else 0
-                duration = meta.get("duration", 0.0)
-                label = f"{clip_name} ({frames} frames, {duration:.2f}s)"
-                self.clip_combo.addItem(label, clip_name)
-            if clips:
-                self.clip_combo.setCurrentIndex(0)
-                self.clip_combo.setEnabled(True)
-        else:
-            self._clip_models = []
-            self.viewport.set_animation_clips([])
-
-        self.stop_playback()
-        self.update_animation_ui()
+        self._set_animation_clips(clips)
 
         msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
         if auto_mat:
@@ -457,6 +504,7 @@ class MainWindow(QMainWindow):
             return
 
         if parsed.has_geometry:
+            self._set_animation_clips([])
             if parsed.has_animation:
                 self.animation_targets = parsed.vertex_targets
 
@@ -537,9 +585,8 @@ class MainWindow(QMainWindow):
         settings = QSettings("SourceModelViewer", "Settings")
         auto_mount_enabled = settings.value("materials/auto_mount", True, type=bool)
 
-        auto_mat = None
         if auto_mount_enabled:
-            auto_mat = self._auto_add_materials_root(file_path)
+            self._auto_add_materials_root(file_path)
 
     def open_dmx_model(self, file_path):
         try:
@@ -556,6 +603,7 @@ class MainWindow(QMainWindow):
         message = None
 
         if reference_model is not None and reference_model.has_geometry:
+            self._set_animation_clips([])
             if reference_model.has_animation:
                 self.animation_targets = reference_model.vertex_targets
 
@@ -572,19 +620,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message)
 
         # Handle animation clips
+        if (
+            reference_model is not None and reference_model.has_geometry
+        ) or animation_clips:
+            self._set_animation_clips(animation_clips)
         if animation_clips:
-            self._clip_models = animation_clips   # store for later (optional)
-            self.viewport.set_animation_clips(animation_clips)
-            self.clip_combo.clear()
-            for name, model in animation_clips:
-                meta = model.metadata
-                frames = len(model.frames) if model.frames else 0
-                duration = meta.get("duration", 0.0)
-                label = f"{name} ({frames} frames, {duration:.2f}s)"
-                self.clip_combo.addItem(label, name)   # store name as user data
-            if animation_clips:
-                self.clip_combo.setCurrentIndex(0)
-                self.clip_combo.setEnabled(True)
             loaded_something = True
             if message is None:
                 message = f"Loaded {len(animation_clips)} animation clips from DMX"
@@ -600,13 +640,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # If we have both reference and animation, make sure skeletal is set
-        if animation_clips and reference_model is not None and reference_model.has_geometry:
-            # The renderer already has the first clip loaded via set_animation_clips
-            pass
-
-        self.stop_playback()
-        self.update_animation_ui()
         self._show_animation_warnings()
 
     def open_sequence(self):
@@ -639,21 +672,12 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-            self.viewport.set_animation_clips(animation_clips)
-            self.clip_combo.clear()
-            for name, _ in animation_clips:
-                self.clip_combo.addItem(name)
-            if animation_clips:
-                self.clip_combo.setCurrentIndex(0)
-                self.clip_combo.setEnabled(True)
+            self._set_animation_clips(animation_clips)
 
             self._try_auto_flex_info(file_path)
 
             if self.flex_info is not None:
                 self.apply_flex_info(self.flex_info, self.flex_info_override)
-
-            self.stop_playback()
-            self.update_animation_ui()
 
             self.statusBar().showMessage(
                 f"Loaded {len(animation_clips)} DMX clips from {file_path}"
@@ -678,6 +702,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._set_animation_clips([])
         self.viewport.set_skeletal_animation_model(parsed)
 
         self._try_auto_flex_info(file_path)
@@ -890,16 +915,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Animation cleared")
 
     def clear_sequence(self):
-        self.viewport.clear_skeletal_animation()
-        self._clip_models = []
-        self.clip_combo.clear()
-        self.clip_combo.setEnabled(False)
-        self.sequence_slider.setValue(0)
+        self._set_animation_clips([])
         self.sequence_slider.setEnabled(False)
-
-        self.stop_playback()
-        self.update_animation_ui()
-
         self.statusBar().showMessage("Sequence cleared")
 
     def reset_camera(self):
@@ -1264,17 +1281,13 @@ class MainWindow(QMainWindow):
         self.fps_spin.setEnabled(play_enabled)
 
         # Update clip combo and sequence slider
-        clips = self.viewport.clip_names() if hasattr(self.viewport, 'clip_names') else []
+        clips = self.viewport.clip_names()
         if clips:
             self.clip_combo.setEnabled(True)
-            # Ensure current index matches
-            current_name = self.viewport.current_clip_name() if hasattr(self.viewport, 'current_clip_name') else ""
-            if current_name:
-                idx = self.clip_combo.findData(current_name)
-                if idx < 0:
-                    idx = self.clip_combo.findText(current_name)
-                if idx >= 0:
-                    self.clip_combo.setCurrentIndex(idx)
+            current_index = self.viewport.current_clip_index()
+            if 0 <= current_index < self.clip_combo.count():
+                if self.clip_combo.currentIndex() != current_index:
+                    self.clip_combo.setCurrentIndex(current_index)
         else:
             self.clip_combo.setEnabled(False)
 

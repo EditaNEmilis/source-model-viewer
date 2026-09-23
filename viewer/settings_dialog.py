@@ -1,5 +1,4 @@
-import os
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,

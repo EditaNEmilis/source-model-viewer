@@ -241,6 +241,9 @@ class Viewport(QOpenGLWidget):
     def current_clip_name(self):
         return self.renderer.current_clip_name()
 
+    def current_clip_index(self):
+        return self.renderer.current_clip_index()
+
     def event(self, event):
         if event.type() == QEvent.Type.ShortcutOverride:
             if event.key() == Qt.Key_Alt or (event.modifiers() & Qt.AltModifier):

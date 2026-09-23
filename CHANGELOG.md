@@ -24,6 +24,17 @@ Changelog of each versions.
 - Beta models now report their used material names instead of an empty set.
 - Internal cleanup: the 850 line beta animation decoder is now a short orchestration pass over focused helpers (naming, bind pose, enumeration, grouping, pairing, collection, attribution, decode), verified byte identical on all four models. Also removed a dead run predicate and the unused slot bookkeeping.
 
+### [0.7.1]
+
+#### Added
+- Retail GoldSrc clips now expose every declared animation blend as a separate selectable clip, with blend and sequence-group metadata.
+- External GoldSrc `IDSQ` sequence groups are resolved beside the base model, validated, and decoded into the same clip format as local animations. Missing or invalid companions remain available as bind-pose clips with a status note.
+
+#### Fixed
+- Corrected the retail `mstudioseqdesc_t` sequence-group and blend-field offsets.
+- Opening a replacement primary model now clears skeletal clips owned by the previous model. Empty clip input resets renderer state, and duplicate clip names retain independent metadata.
+- Internal cleanup resolved unused imports and locals, initialized the beta multi-run fallback state, and removed stale explicit boolean comparisons.
+
 ## [0.6.0] | MDL and Preferences
 
 ### Added

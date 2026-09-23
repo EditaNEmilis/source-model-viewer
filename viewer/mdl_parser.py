@@ -2,7 +2,7 @@ import math
 import os
 import re
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 try:
     import numpy as _np
@@ -87,7 +87,6 @@ def read_vmdl_c_info(path: str) -> dict:
         if s.endswith((".vmdl", ".dmx", ".vmdl_prefab"))
     })
 
-    mdat_strings = _block_strings("MDAT")
     mdat_raw = b""
     if "MDAT" in blocks:
         entry = blocks["MDAT"]
@@ -1126,6 +1125,7 @@ def _beta_attribute_entries(data: bytes, raw_entries, bind_pos, numbones, bnames
             for ent in raw_entries:
                 by_run.setdefault(ent["run"], []).append(ent)
             start = 0
+            prev_end = -1
             for ordinal in sorted(by_run):
                 if ordinal > 0:
                     start = prev_end + 1

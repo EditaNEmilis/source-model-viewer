@@ -1,6 +1,7 @@
 ### GoldSrc MDL (HLMDL) ###
 
 import math
+import ntpath
 import os
 import struct
 
@@ -27,6 +28,10 @@ STUDIO_NF_ADDITIVE = 32
 STUDIO_NF_MASKED = 64
 
 TRANSPARENT_INDEX = 255
+
+RETAIL_SEQUENCE_SIZE = 176
+RETAIL_SEQUENCE_GROUP_SIZE = 104
+RETAIL_SEQUENCE_HEADER_SIZE = 76
 
 
 def is_gldsrc_version(version: int) -> bool:
@@ -641,53 +646,51 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
 
 def _decode_animvalue_channel(data: bytes, pos: int, numframes: int):
     # GoldSrc mstudioanimvalue_t RLE chain covering numframes.
-    # Each span is 2 bytes valid/total plus valid shorts.
-    # Returns a list of raw short values per frame.
+    # Each span is two bytes (valid, total) followed by valid signed shorts.
+    # Return None when a non-zero channel pointer does not contain a complete,
+    # structurally valid chain so callers can hold the bone's bind value.
+    if numframes <= 0 or pos <= 0 or pos + 2 > len(data):
+        return None
+
     out = []
     used = 0
-    limit = len(data)
-    guard = 0
-    while len(out) < numframes and guard < 4096:
-        guard += 1
-        if pos + used + 2 > limit:
-            break
-        valid = data[pos + used]
-        total = data[pos + used + 1]
+    while len(out) < numframes:
+        if pos + used + 2 > len(data):
+            return None
+        valid, total = data[pos + used:pos + used + 2]
         used += 2
-        if total == 0:
-            break
-        vals = []
-        for _ in range(valid):
-            if pos + used + 2 > limit:
-                break
-            (v,) = struct.unpack_from("<h", data, pos + used)
-            used += 2
-            vals.append(v)
-        if not vals:
-            vals = [0]
-        for k in range(total):
+        if total == 0 or valid > total:
+            return None
+        span_bytes = valid * 2
+        if pos + used + span_bytes > len(data):
+            return None
+        if valid:
+            values = struct.unpack_from(f"<{valid}h", data, pos + used)
+            used += span_bytes
+        else:
+            values = ()
+        for frame_in_span in range(total):
+            if frame_in_span < valid:
+                out.append(values[frame_in_span])
+            elif values:
+                out.append(values[-1])
+            else:
+                return None
             if len(out) >= numframes:
                 break
-            if k < len(vals):
-                out.append(vals[k])
-            else:
-                out.append(vals[-1])
-    while len(out) < numframes:
-        out.append(out[-1] if out else 0)
+
     return out[:numframes]
 
 
 def _retail_seq_descs(data: bytes, numseq: int, seqindex: int):
-    # Retail v10 mstudioseqdesc_t is 176 bytes. Fields used here:
-    # label[32], fps +32, flags +36, numevents +48, eventindex +52,
-    # numframes +56, numpivots +60, pivotindex +64, numblends +120,
-    # animindex +124, seqgroup +132. Offsets are absolute file offsets.
+    # Retail v10 mstudioseqdesc_t is 176 bytes. Sequence descriptor
+    # pointers are absolute offsets in the base IDST file.
     descs = []
     if numseq < 1 or seqindex <= 0:
         return descs
-    for s in range(max(0, min(numseq, 1024))):
-        entry = seqindex + s * 176
-        if entry + 176 > len(data):
+    for sequence_index in range(max(0, min(numseq, 1024))):
+        entry = seqindex + sequence_index * RETAIL_SEQUENCE_SIZE
+        if entry + RETAIL_SEQUENCE_SIZE > len(data):
             break
         try:
             raw_label = data[entry:entry + 32]
@@ -696,127 +699,386 @@ def _retail_seq_descs(data: bytes, numseq: int, seqindex: int):
             (numframes,) = struct.unpack_from("<i", data, entry + 56)
             (numblends,) = struct.unpack_from("<i", data, entry + 120)
             (animindex,) = struct.unpack_from("<i", data, entry + 124)
-            (seqgroup,) = struct.unpack_from("<i", data, entry + 132)
+            blend_type = struct.unpack_from("<2i", data, entry + 128)
+            blend_start = struct.unpack_from("<2f", data, entry + 136)
+            blend_end = struct.unpack_from("<2f", data, entry + 144)
+            (blendparent,) = struct.unpack_from("<i", data, entry + 152)
+            (seqgroup,) = struct.unpack_from("<i", data, entry + 156)
         except struct.error:
             break
-        name = _read_name(raw_label) or f"seq_{s}"
+
+        name = _read_name(raw_label) or f"seq_{sequence_index}"
         if not 0 < numframes <= 4096:
             continue
-        if numblends < 1:
-            numblends = 1
         descs.append({
             "name": name,
             "fps": fps if fps > 0.0 else 30.0,
             "flags": flags,
             "numframes": numframes,
-            "numblends": min(numblends, 8),
+            "numblends": max(1, numblends),
             "animindex": animindex,
+            "blend_type": blend_type,
+            "blend_start": blend_start,
+            "blend_end": blend_end,
+            "blendparent": blendparent,
             "seqgroup": seqgroup,
         })
     return descs
 
 
-def _retail_animation_clips(data: bytes, bones, bind_transforms, bone_scales,
-                            numseq: int, seqindex: int):
-    # Returns (clips, error). Clips follow the shared
-    # renderer.set_animation_clips convention: (name, SmdModel) pairs
-    # with frame_rate, duration, name, looping in metadata. Only the
-    # first blend of local seqgroup 0 is decoded for 0.7.0. Missing or
-    # external tracks hold the bind pose.
-    clips = []
-    error = ""
-    descs = _retail_seq_descs(data, numseq, seqindex)
-    if not descs:
-        return clips, error
-    external = [d["name"] for d in descs if d["seqgroup"] != 0]
-    if external:
-        error = (
-            f"{len(external)} sequence(s) live in external seqgroups "
-            "and use the bind pose"
+def _retail_seq_groups(data: bytes, numseqgroups: int, seqgroupindex: int):
+    # mstudioseqgroup_t is 104 bytes. The name field points at an IDSQ
+    # companion; the two trailing integers are legacy cache fields.
+    groups = {}
+    if numseqgroups < 1 or seqgroupindex <= 0:
+        return groups
+    for group_index in range(max(0, min(numseqgroups, 1024))):
+        entry = seqgroupindex + group_index * RETAIL_SEQUENCE_GROUP_SIZE
+        if entry + RETAIL_SEQUENCE_GROUP_SIZE > len(data):
+            break
+        groups[group_index] = {
+            "label": _read_name(data[entry:entry + 32]),
+            "name": _read_name(data[entry + 32:entry + 96]),
+        }
+    return groups
+
+
+def _find_case_insensitive_relative(base_dir, parts):
+    current = os.path.realpath(base_dir)
+    for index, part in enumerate(parts):
+        candidate = os.path.join(current, part)
+        if os.path.exists(candidate):
+            current = os.path.realpath(candidate)
+        else:
+            try:
+                names = os.listdir(current)
+            except OSError:
+                return None
+            matches = [name for name in names if name.casefold() == part.casefold()]
+            if len(matches) != 1:
+                return None
+            current = os.path.realpath(os.path.join(current, matches[0]))
+
+        if index < len(parts) - 1 and not os.path.isdir(current):
+            return None
+    return current if os.path.isfile(current) else None
+
+
+def _resolve_retail_group_path(mdl_path: str, group_name: str, group_index: int):
+    base_dir = os.path.dirname(os.path.abspath(mdl_path)) or "."
+    root, ext = os.path.splitext(os.path.abspath(mdl_path))
+    conventional = f"{os.path.basename(root)}{group_index:02d}{ext or '.mdl'}"
+
+    raw_name = (group_name or "").strip().replace("\\", "/")
+    drive, _ = ntpath.splitdrive(raw_name)
+    if drive or raw_name.startswith("/"):
+        return None, "unsafe absolute path"
+
+    parts = [part for part in raw_name.split("/") if part not in ("", ".")]
+    if parts and parts[0].casefold() == "models":
+        parts = parts[1:]
+    base_name = os.path.basename(os.path.realpath(base_dir))
+    if len(parts) > 1 and parts[0].casefold() == base_name.casefold():
+        parts = parts[1:]
+    if not parts:
+        parts = [conventional]
+    elif any(part == ".." for part in parts):
+        return None, "unsafe parent path"
+
+    candidate = _find_case_insensitive_relative(base_dir, parts)
+    if candidate is None:
+        return None, "not found"
+    try:
+        real_base = os.path.normcase(os.path.realpath(base_dir))
+        real_candidate = os.path.normcase(os.path.realpath(candidate))
+        if os.path.commonpath((real_base, real_candidate)) != real_base:
+            return None, "outside the model directory"
+    except ValueError:
+        return None, "outside the model directory"
+    return os.path.realpath(candidate), ""
+
+
+def _load_retail_seq_group(mdl_path, group_index, group_table, cache):
+    if group_index in cache:
+        return cache[group_index]
+
+    group = group_table.get(group_index, {})
+    group_name = group.get("name", "")
+    path, path_error = _resolve_retail_group_path(
+        mdl_path, group_name, group_index
+    )
+    if path is None:
+        shown_name = group_name or f"group {group_index}"
+        result = (
+            None,
+            None,
+            f"sequence group {group_index} companion {path_error}: {shown_name}",
         )
+        cache[group_index] = result
+        return result
+
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as error:
+        result = (None, path, f"could not read {path}: {error}")
+        cache[group_index] = result
+        return result
+
+    if len(raw) < RETAIL_SEQUENCE_HEADER_SIZE:
+        result = (None, path, f"sequence group {group_index} header is truncated: {path}")
+        cache[group_index] = result
+        return result
+
+    magic, version = struct.unpack_from("<4si", raw, 0)
+    (declared_length,) = struct.unpack_from("<i", raw, 72)
+    if magic != b"IDSQ":
+        result = (None, path, f"sequence group {group_index} is not IDSQ: {path}")
+    elif version != 10:
+        result = (
+            None,
+            path,
+            f"sequence group {group_index} has unsupported version {version}: {path}",
+        )
+    elif not RETAIL_SEQUENCE_HEADER_SIZE <= declared_length <= len(raw):
+        result = (
+            None,
+            path,
+            f"sequence group {group_index} has invalid length {declared_length}: {path}",
+        )
+    else:
+        result = (raw[:declared_length], path, "")
+
+    cache[group_index] = result
+    return result
+
+
+def _retail_clip_metadata(desc, blend_index, source_file, fallback,
+                          fallback_reason="", malformed_channels=0):
+    blend_count = 1 if fallback else desc["numblends"]
+    metadata = {
+        "frame_rate": desc["fps"],
+        "duration": desc["numframes"] / desc["fps"] if desc["fps"] > 0 else 0.0,
+        "name": desc["name"],
+        "looping": bool(desc["flags"] & 0x1),
+        "blend_index": blend_index,
+        "blend_count": blend_count,
+        "declared_blend_count": desc["numblends"],
+        "sequence_group": desc["seqgroup"],
+        "source_file": source_file or "",
+        "blend_type": desc["blend_type"],
+        "blend_start": desc["blend_start"],
+        "blend_end": desc["blend_end"],
+        "blend_parent": desc["blendparent"],
+        "fallback": bool(fallback),
+        "malformed_channels": int(malformed_channels),
+    }
+    if fallback_reason:
+        metadata["fallback_reason"] = fallback_reason
+    return metadata
+
+
+def _retail_fallback_clip(bones, bind_transforms, desc, source_file, reason):
+    frames = [
+        SmdFrame(time=frame, transforms=dict(bind_transforms))
+        for frame in range(desc["numframes"])
+    ]
+    clip = SmdModel(version=1, bones=list(bones), frames=frames)
+    clip.metadata.update(
+        _retail_clip_metadata(
+            desc, 0, source_file, True, fallback_reason=reason
+        )
+    )
+    return clip
+
+
+def _retail_blend_clip(data, bones, bind_transforms, bone_scales, desc,
+                       blend_index, source_file):
     identity_pos = (0.0, 0.0, 0.0)
     identity_rot = (0.0, 0.0, 0.0)
+    anim_base = desc["animindex"]
+    per_bone_channels = []
+    malformed_channels = 0
+
+    for bone_index in range(len(bones)):
+        entry = anim_base + (blend_index * len(bones) + bone_index) * 12
+        if entry < 0 or entry + 12 > len(data):
+            return None, malformed_channels
+        try:
+            offsets = struct.unpack_from("<6H", data, entry)
+        except struct.error:
+            return None, malformed_channels
+
+        bind_pos, bind_rot = bind_transforms.get(
+            bone_index, (identity_pos, identity_rot)
+        )
+        base_values = (
+            bind_pos[0], bind_pos[1], bind_pos[2],
+            bind_rot[0], bind_rot[1], bind_rot[2],
+        )
+        scales = bone_scales.get(bone_index, (1.0,) * 6)
+        if len(scales) != 6:
+            scales = (1.0,) * 6
+        channels = []
+        for channel, relative_offset in enumerate(offsets):
+            if relative_offset == 0:
+                channels.append(None)
+                continue
+            values = _decode_animvalue_channel(
+                data, entry + relative_offset, desc["numframes"]
+            )
+            if values is None:
+                malformed_channels += 1
+            channels.append(values)
+        per_bone_channels.append((base_values, scales, channels))
+
+    frames = []
+    for frame_index in range(desc["numframes"]):
+        transforms = {}
+        for bone_index, (base_values, scales, channels) in enumerate(per_bone_channels):
+            values = list(base_values)
+            for channel, channel_values in enumerate(channels):
+                if channel_values is None:
+                    continue
+                try:
+                    raw_value = channel_values[frame_index]
+                    scale = float(scales[channel])
+                    values[channel] = base_values[channel] + float(raw_value) * scale
+                except (IndexError, TypeError, ValueError, OverflowError):
+                    malformed_channels += 1
+                    continue
+
+            position = (float(values[0]), float(values[1]), float(values[2]))
+            rotation = (float(values[3]), float(values[4]), float(values[5]))
+            if all(math.isfinite(value) for value in position + rotation):
+                transforms[bone_index] = (position, rotation)
+            else:
+                transforms[bone_index] = bind_transforms.get(
+                    bone_index, (identity_pos, identity_rot)
+                )
+        frames.append(SmdFrame(time=frame_index, transforms=transforms))
+
+    if not frames:
+        return None, malformed_channels
+    clip = SmdModel(version=1, bones=list(bones), frames=frames)
+    clip.metadata.update(
+        _retail_clip_metadata(
+            desc,
+            blend_index,
+            source_file,
+            False,
+            malformed_channels=malformed_channels,
+        )
+    )
+    return clip, malformed_channels
+
+
+def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
+                            numseq, seqindex, numseqgroups, seqgroupindex):
+    # Returns (clips, error). Clips follow the renderer's shared
+    # (name, SmdModel) convention. Every declared blend is exposed as
+    # an individual selectable clip for inspection.
+    clips = []
+    errors = []
+    malformed_sequences = []
+
+    def add_error(message):
+        if message and message not in errors:
+            errors.append(message)
+
+    descs = _retail_seq_descs(data, numseq, seqindex)
+    if not descs:
+        return clips, ""
+
+    group_table = _retail_seq_groups(data, numseqgroups, seqgroupindex)
+    group_cache = {}
+    model_path = os.path.abspath(mdl_path)
+
     for desc in descs:
-        if desc["seqgroup"] != 0:
+        group_index = desc["seqgroup"]
+        if group_index == 0:
+            group_data = data
+            source_file = model_path
+            group_error = ""
+        elif group_index not in group_table:
+            group_data = None
+            source_file = None
+            group_error = (
+                f"sequence group {group_index} is outside the model group table"
+            )
+        else:
+            group_data, source_file, group_error = _load_retail_seq_group(
+                mdl_path, group_index, group_table, group_cache
+            )
+
+        if group_error:
+            fallback = _retail_fallback_clip(
+                bones, bind_transforms, desc, source_file, group_error
+            )
+            clips.append((desc["name"], fallback))
+            add_error(f"{desc['name']}: {group_error}")
             continue
-        numframes = desc["numframes"]
-        anim_base = desc["animindex"]
-        if not 0 < anim_base < len(data):
+
+        if not bones:
+            reason = "sequence has no bones"
+            fallback = _retail_fallback_clip(
+                bones, bind_transforms, desc, source_file, reason
+            )
+            clips.append((desc["name"], fallback))
+            add_error(f"{desc['name']}: {reason}")
             continue
-        # First blend only. Each bone has one 12 byte mstudioanim_t
-        # with 6 unsigned short offsets relative to its own entry.
-        # Channels 0..2 are position, 3..5 rotation, in the same units
-        # as the bone table bind values.
-        per_bone_frames = []
-        ok = True
-        for i in range(len(bones)):
-            entry = anim_base + i * 12
-            if entry + 12 > len(data):
-                ok = False
+
+        record_size = len(bones) * 12
+        record_end = desc["animindex"] + desc["numblends"] * record_size
+        if desc["animindex"] <= 0 or record_end > len(group_data):
+            reason = "animation record table is missing or truncated"
+            fallback = _retail_fallback_clip(
+                bones, bind_transforms, desc, source_file, reason
+            )
+            clips.append((desc["name"], fallback))
+            add_error(f"{desc['name']}: {reason}")
+            continue
+
+        sequence_clips = []
+        for blend_index in range(desc["numblends"]):
+            clip, malformed_channels = _retail_blend_clip(
+                group_data,
+                bones,
+                bind_transforms,
+                bone_scales,
+                desc,
+                blend_index,
+                source_file,
+            )
+            if clip is None:
+                sequence_clips = []
+                add_error(
+                    f"{desc['name']}: blend {blend_index + 1} is truncated"
+                )
                 break
-            try:
-                offsets = struct.unpack_from("<6H", data, entry)
-            except struct.error:
-                ok = False
-                break
-            bind_pos, bind_rot = bind_transforms.get(i, (identity_pos, identity_rot))
-            base_vals = (bind_pos[0], bind_pos[1], bind_pos[2],
-                         bind_rot[0], bind_rot[1], bind_rot[2])
-            scales = bone_scales.get(i, (1.0,) * 6)
-            channels = []
-            for c in range(6):
-                off = offsets[c]
-                if off == 0:
-                    channels.append(None)
-                else:
-                    start = entry + off
-                    if not 0 < start < len(data):
-                        channels.append(None)
-                    else:
-                        try:
-                            channels.append(
-                                _decode_animvalue_channel(data, start, numframes)
-                            )
-                        except Exception:
-                            channels.append(None)
-            per_bone_frames.append((base_vals, scales, channels))
-        if not ok or not per_bone_frames:
-            continue
-        frames = []
-        for f in range(numframes):
-            transforms = {}
-            for i, (base_vals, scales, channels) in enumerate(per_bone_frames):
-                vals = list(base_vals)
-                for c in range(6):
-                    ch = channels[c]
-                    if ch is None:
-                        continue
-                    try:
-                        raw = ch[f]
-                    except IndexError:
-                        continue
-                    try:
-                        vals[c] = base_vals[c] + float(raw) * float(scales[c])
-                    except Exception:
-                        continue
-                pos = (float(vals[0]), float(vals[1]), float(vals[2]))
-                rot = (float(vals[3]), float(vals[4]), float(vals[5]))
-                if all(math.isfinite(v) for v in pos + rot):
-                    transforms[i] = (pos, rot)
-                else:
-                    transforms[i] = bind_transforms.get(i, (identity_pos, identity_rot))
-            frames.append(SmdFrame(time=f, transforms=transforms))
-        if not frames:
-            continue
-        clip = SmdModel(version=1, bones=list(bones), frames=frames)
-        clip.metadata.update({
-            "frame_rate": desc["fps"],
-            "duration": numframes / desc["fps"] if desc["fps"] > 0 else 0.0,
-            "name": desc["name"],
-            "looping": bool(desc["flags"] & 0x1),
-        })
-        clips.append((desc["name"], clip))
-    return clips, error
+            sequence_clips.append((desc["name"], clip))
+            if malformed_channels and desc["name"] not in malformed_sequences:
+                malformed_sequences.append(desc["name"])
+
+        if sequence_clips:
+            clips.extend(sequence_clips)
+        else:
+            fallback = _retail_fallback_clip(
+                bones,
+                bind_transforms,
+                desc,
+                source_file,
+                "animation record table is invalid",
+            )
+            clips.append((desc["name"], fallback))
+
+    if malformed_sequences:
+        add_error(
+            f"{len(malformed_sequences)} sequence(s) contain malformed channels; "
+            "affected channels use the bind pose"
+        )
+
+    return clips, "; ".join(errors)
 
 
 def _load_textures(texture_data: bytes, numtextures: int, textureindex: int):
@@ -1033,7 +1295,7 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
                         )
 
                         texture_flags[tex_name] = tex_flags
-                    except (ValueError, struct.error) as error:
+                    except (ValueError, struct.error):
                         pass
 
                 pos = triindex
@@ -1137,7 +1399,15 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
 
     try:
         clips, anim_error = _retail_animation_clips(
-            data, bones, bind_transforms, bone_scales, numseq, seqindex
+            mdl_path,
+            data,
+            bones,
+            bind_transforms,
+            bone_scales,
+            numseq,
+            seqindex,
+            numseqgroups,
+            seqgroupindex,
         )
         if clips:
             model.metadata["animation_clips"] = clips

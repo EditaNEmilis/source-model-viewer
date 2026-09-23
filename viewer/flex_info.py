@@ -1,6 +1,6 @@
 import re
 
-from typing import Dict, Optional
+from typing import Dict
 
 
 def _read_text_lines(path: str):

@@ -16,7 +16,6 @@ from OpenGL.GL import (
     GL_DIFFUSE,
     GL_FRONT_AND_BACK,
     GL_GREATER,
-    GL_GENERATE_MIPMAP,
     GL_LIGHT0,
     GL_LIGHTING,
     GL_LINE,
@@ -62,7 +61,6 @@ from OpenGL.GL import (
     glMatrixMode,
     glPointSize,
     glPolygonMode,
-    glPolygonOffset,
     glPopMatrix,
     glPushMatrix,
     glRotatef,
@@ -80,7 +78,7 @@ from viewer.pose import VertexAnimator
 from viewer.skeleton import SkeletonRig, SkeletalAnimation, evaluate_world_matrices
 from viewer.skinning import Skinning
 from viewer.vtf_parser import parse_vtf, VtfError
-from viewer.vmt_parser import parse_vmt, VmtParseError
+from viewer.vmt_parser import parse_vmt
 
 
 class Renderer:
@@ -125,7 +123,6 @@ class Renderer:
         self._animation_clips = []
         self._current_clip_index = -1
         self._current_clip_name = ""
-        self._clip_metadata = {}
 
         self.texture_cache = {}
         self.material_props = {}
@@ -220,7 +217,7 @@ class Renderer:
             texcoords = np.array(
                 [vertex.uv for vertex in model.vertices], dtype=np.float32
             )
-            if model.uv_pre_flipped == True:
+            if model.uv_pre_flipped:
                 texcoords[:, 1] = 1.0 - texcoords[:, 1]
 
             self.model_center = [
@@ -897,8 +894,8 @@ class Renderer:
     # ------------------------------------------------------------------
 
     def set_animation_clips(self, clips):
-        self._animation_clips = clips if clips else []
-        self._clip_metadata = {name: model.metadata for name, model in clips}
+        self._animation_clips = list(clips) if clips else []
+        self._current_clip_index = -1
         self._current_clip_name = ""
         if self._animation_clips:
             self._current_clip_index = 0
@@ -921,10 +918,13 @@ class Renderer:
     def current_clip_name(self):
         return self._current_clip_name
 
+    def current_clip_index(self):
+        return self._current_clip_index
+
     def clip_metadata(self, index):
         if 0 <= index < len(self._animation_clips):
-            name, _ = self._animation_clips[index]
-            return self._clip_metadata.get(name, {})
+            _, model = self._animation_clips[index]
+            return model.metadata
         return {}
 
     def set_skeletal_progress(self, progress):

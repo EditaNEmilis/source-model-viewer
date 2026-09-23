@@ -4,7 +4,7 @@ import math
 import re
 import struct
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 from viewer.skeleton import quat_slerp, quat_to_euler
 from viewer.smd_parser import (
@@ -1369,11 +1369,6 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
 
     base_positions = [vertex.position for vertex in model.vertices]
     base_normals = [vertex.normal for vertex in model.vertices]
-
-    basis_overrides = {
-        i: (base_positions[i], base_normals[i])
-        for i in range(len(model.vertices))
-    }
 
     next_time = 1
     for mesh_index, mesh in enumerate(document.find_all("DmeMesh")):

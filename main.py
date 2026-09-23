@@ -3,6 +3,7 @@ import sys
 from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
+from viewer import __version__
 from viewer.main_window import MainWindow
 
 
@@ -15,6 +16,7 @@ def main():
     QSurfaceFormat.setDefaultFormat(surface_format)
 
     app = QApplication(sys.argv)
+    app.setApplicationVersion(__version__)
     app.setApplicationName("Source Model Viewer")
     app.setOrganizationName("SourceModelViewer")
 

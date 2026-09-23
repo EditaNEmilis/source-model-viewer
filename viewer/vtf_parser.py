@@ -2,7 +2,7 @@
 
 import struct
 import numpy as np
-from typing import Optional, Tuple
+from typing import Tuple
 
 # Image format enum values (Source SDK imageformat.h)
 IMAGE_FORMAT_RGBA8888 = 0
@@ -329,7 +329,6 @@ def parse_vtf(path: str) -> Tuple[VtfInfo, np.ndarray]:
     # (They're stored in order, so frame 0 face 0 is first)
     target_w = info.width
     target_h = info.height
-    target_d = info.depth
     image_size = _mip_image_size(info.high_res_format, target_w, target_h)
 
     if offset + image_size > len(data):
@@ -361,14 +360,12 @@ def _skip_resources_v73(data, info):
     # Each entry is 8 bytes: tag[3] + flags[1] + offset[4]
     resource_start = 80
     entry_size = 8
-    max_offset = info.header_size  # at minimum, data starts after header
 
     for i in range(info.num_resources):
         entry_offset = resource_start + i * entry_size
         if entry_offset + entry_size > len(data):
             break
         tag = data[entry_offset:entry_offset + 3]
-        res_flags = data[entry_offset + 3]
         res_offset, = struct.unpack_from("<I", data, entry_offset + 4)
 
         # Tag {0x30, 0x00, 0x00} is the high-res image data resource
