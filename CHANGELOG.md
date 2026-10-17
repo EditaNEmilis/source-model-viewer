@@ -2,7 +2,7 @@
 
 Changelog of each versions.
 
-## [0.8.0] | Source 2 textures
+## [0.8.0] | Source 2 update
 
 ### Added
 - `.vtex_c` import: texture header, extra-data table and full mip chain, including LZ4-compressed mips. DXT1, DXT5, BC4, BC5 and BC7 upload as compressed GL textures; RGBA8888, BGRA8888, I8, IA88, A8 and R8 decode to RGBA.
