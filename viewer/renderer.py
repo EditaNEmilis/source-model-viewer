@@ -27,36 +27,65 @@ from OpenGL.GL import (
     GL_MODELVIEW,
     GL_MODULATE,
     GL_NORMALIZE,
+    GL_NUM_EXTENSIONS,
     GL_ONE_MINUS_SRC_ALPHA,
     GL_POSITION,
     GL_PROJECTION,
     GL_RGBA,
+    GL_REPEAT,
     GL_SRC_ALPHA,
     GL_TEXTURE_2D,
+    GL_TEXTURE0,
+    GL_TEXTURE1,
+    GL_TEXTURE2,
     GL_TEXTURE_ENV,
     GL_TEXTURE_ENV_MODE,
     GL_TEXTURE_MAG_FILTER,
+    GL_TEXTURE_MAX_LEVEL,
     GL_TEXTURE_MIN_FILTER,
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_UNSIGNED_BYTE,
+    GL_VERTEX_SHADER,
+    GL_FRAGMENT_SHADER,
+    GL_COMPILE_STATUS,
+    GL_LINK_STATUS,
     glAlphaFunc,
+    glActiveTexture,
+    glAttachShader,
     glBegin,
     glBindTexture,
     glBlendFunc,
     glClear,
     glClearColor,
+    glClientActiveTexture,
     glColor3f,
     glColor4f,
+    glColorMask,
     glColorMaterial,
+    glCompileShader,
+    glCompressedTexImage2D,
+    glCreateProgram,
+    glCreateShader,
+    glDeleteProgram,
+    glDeleteShader,
     glDeleteTextures,
     glDisable,
     glEnable,
     glEnd,
     glGenTextures,
     glGenerateMipmap,
+    glGetProgramInfoLog,
+    glGetProgramiv,
+    glGetShaderInfoLog,
+    glGetShaderiv,
+    glGetString,
+    glGetIntegerv,
+    glGetStringi,
+    glGetUniformLocation,
     glLightfv,
     glLineWidth,
+    glLinkProgram,
     glLoadIdentity,
     glMatrixMode,
     glPointSize,
@@ -64,12 +93,26 @@ from OpenGL.GL import (
     glPopMatrix,
     glPushMatrix,
     glRotatef,
+    glShaderSource,
     glTexImage2D,
     glTexParameteri,
     glTexEnvi,
     glTranslatef,
+    glUniform1f,
+    glUniform1i,
+    glUniform3f,
+    glUseProgram,
     glVertex3f,
     glViewport,
+)
+from OpenGL.GL.ARB.texture_compression_bptc import GL_COMPRESSED_RGBA_BPTC_UNORM_ARB
+from OpenGL.GL.ARB.texture_compression_rgtc import (
+    GL_COMPRESSED_RED_RGTC1,
+    GL_COMPRESSED_RG_RGTC2,
+)
+from OpenGL.GL.EXT.texture_compression_s3tc import (
+    GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+    GL_COMPRESSED_RGBA_S3TC_DXT5_EXT,
 )
 from OpenGL.GLU import gluPerspective
 from viewer.camera import Camera
@@ -77,8 +120,153 @@ from viewer.mesh_buffers import MeshBuffers
 from viewer.pose import VertexAnimator
 from viewer.skeleton import SkeletonRig, SkeletalAnimation, evaluate_world_matrices
 from viewer.skinning import Skinning
+from viewer.vmat_parser import (
+    VmatError,
+    parse_vmat_c,
+    pick_color_texture,
+    pick_normal_texture,
+    pick_occlusion_texture,
+)
+from viewer.vtex_parser import VtexError, parse_vtex_c
 from viewer.vtf_parser import parse_vtf, VtfError
 from viewer.vmt_parser import parse_vmt
+
+# BC compression kind -> (OpenGL internal format, required extension).
+_COMPRESSED_FORMATS = {
+    "dxt1": (GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, "GL_EXT_texture_compression_s3tc"),
+    "dxt5": (GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, "GL_EXT_texture_compression_s3tc"),
+    "bc4": (GL_COMPRESSED_RED_RGTC1, "GL_ARB_texture_compression_rgtc"),
+    "bc5": (GL_COMPRESSED_RG_RGTC2, "GL_ARB_texture_compression_rgtc"),
+    "bc7": (GL_COMPRESSED_RGBA_BPTC_UNORM_ARB, "GL_ARB_texture_compression_bptc"),
+}
+
+_GL_EXTENSION_FALLBACKS = {
+    "GL_ARB_texture_compression_rgtc": "GL_EXT_texture_compression_rgtc",
+}
+
+# Fixed-function style lighting for Source 2 materials with a normal map.
+_MODEL_VERTEX_SHADER = """
+#version 120
+varying vec2 vUv;
+varying vec3 vNormal;
+varying vec3 vViewPos;
+
+void main() {
+    vUv = gl_MultiTexCoord0.xy;
+    vNormal = normalize(gl_NormalMatrix * gl_Normal);
+    vec4 viewPos = gl_ModelViewMatrix * gl_Vertex;
+    vViewPos = viewPos.xyz;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+}
+"""
+
+_MODEL_FRAGMENT_SHADER = """
+#version 120
+uniform sampler2D colorMap;
+uniform sampler2D normalMap;
+uniform sampler2D aoMap;
+uniform vec3 tint;
+uniform vec3 lightDir;
+uniform float ambientStrength;
+uniform float diffuseStrength;
+uniform float alphaThreshold;
+uniform float aoStrength;
+uniform int hasNormal;
+uniform int hasAo;
+uniform int aoChannel;
+uniform int unlit;
+uniform int alphaTest;
+
+varying vec2 vUv;
+varying vec3 vNormal;
+varying vec3 vViewPos;
+
+void main() {
+    vec4 base = texture2D(colorMap, vUv);
+    if (alphaTest == 1 && base.a < alphaThreshold) {
+        discard;
+    }
+
+    vec3 n = normalize(vNormal);
+    if (hasNormal == 1) {
+        vec2 nxy = texture2D(normalMap, vUv).rg * 2.0 - 1.0;
+        vec3 dp1 = dFdx(vViewPos);
+        vec3 dp2 = dFdy(vViewPos);
+        vec2 duv1 = dFdx(vUv);
+        vec2 duv2 = dFdy(vUv);
+        vec3 dp2perp = cross(dp2, n);
+        vec3 dp1perp = cross(n, dp1);
+        vec3 tangent = dp2perp * duv1.x + dp1perp * duv2.x;
+        vec3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
+        float invmax = inversesqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 1e-8));
+        vec3 mapped = vec3(nxy, sqrt(max(0.0, 1.0 - dot(nxy, nxy))));
+        n = normalize(mat3(tangent * invmax, bitangent * invmax, n) * mapped);
+    }
+
+    vec3 lit;
+    if (unlit == 1) {
+        lit = base.rgb;
+    } else {
+        float ao = 1.0;
+        if (hasAo == 1) {
+            vec4 maskSample = texture2D(aoMap, vUv);
+            float occlusion = (aoChannel == 1) ? maskSample.g : maskSample.r;
+            ao = mix(1.0, occlusion, aoStrength);
+        }
+        float ndl = max(dot(n, normalize(lightDir)), 0.0);
+        lit = base.rgb * (ambientStrength * ao + diffuseStrength * ndl);
+    }
+
+    gl_FragColor = vec4(lit * tint, base.a);
+}
+"""
+
+_LIGHT_DIR = (0.4, 0.4, 1.0)
+_MODEL_UNIFORMS = (
+    "colorMap", "normalMap", "aoMap", "tint", "lightDir",
+    "ambientStrength", "diffuseStrength", "alphaThreshold", "aoStrength",
+    "hasNormal", "hasAo", "aoChannel", "unlit", "alphaTest",
+)
+
+
+def _vtex_wrap_modes(flags):
+    """Map VTexFlags clamp suggestions to GL wrap modes."""
+    wrap_s = GL_CLAMP_TO_EDGE if flags & 0x1 else GL_REPEAT
+    wrap_t = GL_CLAMP_TO_EDGE if flags & 0x2 else GL_REPEAT
+    return wrap_s, wrap_t
+
+
+def _compile_shader(stage, source):
+    shader = glCreateShader(stage)
+    glShaderSource(shader, source)
+    glCompileShader(shader)
+    if not glGetShaderiv(shader, GL_COMPILE_STATUS):
+        log = glGetShaderInfoLog(shader)
+        glDeleteShader(shader)
+        raise RuntimeError(log.decode("utf-8", "replace") if isinstance(log, bytes) else str(log))
+    return shader
+
+
+def _compile_program(vertex_source, fragment_source):
+    vertex = _compile_shader(GL_VERTEX_SHADER, vertex_source)
+    try:
+        fragment = _compile_shader(GL_FRAGMENT_SHADER, fragment_source)
+    except Exception:
+        glDeleteShader(vertex)
+        raise
+
+    program = glCreateProgram()
+    glAttachShader(program, vertex)
+    glAttachShader(program, fragment)
+    glLinkProgram(program)
+    glDeleteShader(vertex)
+    glDeleteShader(fragment)
+
+    if not glGetProgramiv(program, GL_LINK_STATUS):
+        log = glGetProgramInfoLog(program)
+        glDeleteProgram(program)
+        raise RuntimeError(log.decode("utf-8", "replace") if isinstance(log, bytes) else str(log))
+    return program
 
 
 class Renderer:
@@ -126,11 +314,16 @@ class Renderer:
 
         self.texture_cache = {}
         self.material_props = {}
+        self.material_maps = {}
         self.material_dirs = []
         self.model_material_dirs = []
         self._material_batches = []
+        self._gl_extensions = None
+        self._model_shader = None
+        self._model_uniforms = {}
 
     def initialize(self):
+        glActiveTexture(GL_TEXTURE0)
         glClearColor(*self.background_color)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_NORMALIZE)
@@ -147,6 +340,9 @@ class Renderer:
     def paint(self):
         if self.width <= 0 or self.height <= 0:
             return
+        # Embedding toolkits may leave any unit active.
+        glActiveTexture(GL_TEXTURE0)
+        glClientActiveTexture(GL_TEXTURE0)
         glClearColor(*self.background_color)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glMatrixMode(GL_PROJECTION)
@@ -285,8 +481,14 @@ class Renderer:
         for tex_id in self.texture_cache.values():
             if tex_id:
                 glDeleteTextures(1, [tex_id])
+        for maps in self.material_maps.values():
+            for key in ("normal", "ao"):
+                tex_id = maps.get(key)
+                if tex_id:
+                    glDeleteTextures(1, [tex_id])
         self.texture_cache = {}
         self.material_props = {}
+        self.material_maps = {}
         checker_id = getattr(self, "_checker_tex", None)
         if checker_id:
             try:
@@ -301,11 +503,14 @@ class Renderer:
 
         clean_name = name.strip().replace("\\", "/").strip('"/')
 
-        dot = clean_name.rfind(".")
-        if dot > 0:
-            existing = clean_name[dot + 1:].lower()
-            if existing in ("vtf", "vmt", "bmp", "tga", "png", "jpg", "jpeg"):
-                clean_name = clean_name[:dot]
+        lowered = clean_name.lower()
+        for suffix in (
+            ".vmat_c", ".vtex_c", ".vmat", ".vtex",
+            ".vtf", ".vmt", ".bmp", ".tga", ".png", ".jpg", ".jpeg",
+        ):
+            if lowered.endswith(suffix):
+                clean_name = clean_name[:-len(suffix)]
+                break
 
         if clean_name.lower().startswith("materials/"):
             clean_name = clean_name[10:]
@@ -433,6 +638,14 @@ class Renderer:
             self.texture_cache[material_name] = tex_id
             return tex_id
 
+        # Source 2 models resolve textures through .vmat_c -> .vtex_c.
+        if self._is_source2_model():
+            tex_id = self._load_source2_material_texture(material_name, props)
+            if tex_id is not None or props["nodraw"]:
+                self.material_props[material_name] = props
+                self.texture_cache[material_name] = tex_id
+                return tex_id
+
         vmt_path = self._resolve_path(material_name, ".vmt")
         if vmt_path and os.path.isfile(vmt_path):
             try:
@@ -475,14 +688,14 @@ class Renderer:
         self.texture_cache[material_name] = tex_id
         return tex_id
 
-    def _upload_rgba_texture(self, rgba):
+    def _upload_rgba_texture(self, rgba, wrap_s=GL_CLAMP_TO_EDGE, wrap_t=GL_CLAMP_TO_EDGE):
         tex_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, tex_id)
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t)
 
         height, width = rgba.shape[0], rgba.shape[1]
         glTexImage2D(
@@ -493,6 +706,238 @@ class Renderer:
         glGenerateMipmap(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, 0)
         return tex_id
+
+    # ------------------------------------------------------------------
+    # Source 2 materials and textures
+    # ------------------------------------------------------------------
+
+    def _is_source2_model(self):
+        metadata = getattr(self.model, "metadata", None) or {}
+        return metadata.get("source") == "vmdl_c"
+
+    def _find_source2_material(self, material_name):
+        reference = None
+        if self.model is not None:
+            paths = self.model.metadata.get("material_paths") or {}
+            reference = paths.get(material_name)
+
+        path = self._resolve_path(reference, ".vmat_c") if reference else None
+        if path is None:
+            path = self._resolve_path(material_name, ".vmat_c")
+        return path
+
+    def _resolve_source2_texture(self, reference):
+        return self._resolve_path(reference, ".vtex_c")
+
+    def _load_source2_material_texture(self, material_name, props):
+        vmat_path = self._find_source2_material(material_name)
+        if vmat_path is None:
+            return None
+
+        try:
+            material = parse_vmat_c(vmat_path)
+        except (VmatError, OSError):
+            return None
+
+        tint = material.vector_params.get("g_vColorTint")
+        if tint and len(tint) >= 3:
+            props["color"] = tuple(
+                min(1.0, max(0.0, float(component))) for component in tint[:3]
+            ) + (1.0,)
+        if material.int_params.get("F_ALPHA_TEST"):
+            props["alphatest"] = True
+
+        reference = pick_color_texture(material)
+        if not reference:
+            return None
+
+        texture_path = self._resolve_source2_texture(reference)
+        if texture_path is None:
+            return None
+
+        try:
+            texture = parse_vtex_c(texture_path)
+        except (VtexError, OSError):
+            return None
+
+        normal_id = self._load_source2_map(pick_normal_texture(material))
+        ao_reference, ao_channel = pick_occlusion_texture(material)
+        ao_id = self._load_source2_map(ao_reference)
+        self.material_maps[material_name] = {
+            "normal": normal_id,
+            "ao": ao_id,
+            "ao_channel": ao_channel,
+        }
+
+        if texture.rgba is not None:
+            wrap_s, wrap_t = _vtex_wrap_modes(texture.flags)
+            return self._upload_rgba_texture(texture.rgba, wrap_s, wrap_t)
+        return self._upload_compressed_texture(texture)
+
+    def _load_source2_map(self, reference):
+        if not reference:
+            return None
+        texture_path = self._resolve_source2_texture(reference)
+        if texture_path is None:
+            return None
+        try:
+            texture = parse_vtex_c(texture_path)
+        except (VtexError, OSError):
+            return None
+        if texture.rgba is not None:
+            wrap_s, wrap_t = _vtex_wrap_modes(texture.flags)
+            return self._upload_rgba_texture(texture.rgba, wrap_s, wrap_t)
+        return self._upload_compressed_texture(texture)
+
+    def _ensure_model_shader(self):
+        if self._model_shader is not None:
+            return self._model_shader or None
+
+        try:
+            program = _compile_program(_MODEL_VERTEX_SHADER, _MODEL_FRAGMENT_SHADER)
+        except Exception:
+            self._model_shader = False
+            return None
+
+        self._model_shader = program
+        self._model_uniforms = {
+            name: glGetUniformLocation(program, name) for name in _MODEL_UNIFORMS
+        }
+        return program
+
+    def _gl_extension_supported(self, extension):
+        if self._gl_extensions is None:
+            self._gl_extensions = self._query_gl_extensions()
+        if not self._gl_extensions:
+            # Extension list unavailable (core profile on some drivers):
+            # let the driver accept or reject the upload.
+            return True
+        return extension in self._gl_extensions
+
+    @staticmethod
+    def _query_gl_extensions():
+        extensions = set()
+        try:
+            raw = glGetString(GL_EXTENSIONS)
+            if raw:
+                text = raw.decode("ascii", "replace") if isinstance(raw, bytes) else str(raw)
+                extensions.update(text.split())
+        except Exception:
+            pass
+        if extensions:
+            return extensions
+
+        try:
+            count = int(glGetIntegerv(GL_NUM_EXTENSIONS))
+            for index in range(min(count, 8192)):
+                name = glGetStringi(GL_EXTENSIONS, index)
+                if name:
+                    extensions.add(
+                        name.decode("ascii", "replace")
+                        if isinstance(name, bytes) else str(name)
+                    )
+        except Exception:
+            pass
+        return extensions
+
+    def _upload_compressed_texture(self, texture):
+        if not texture.compression or not texture.compressed_mips:
+            return None
+
+        spec = _COMPRESSED_FORMATS.get(texture.compression)
+        if spec is None:
+            return None
+        internal_format, extension = spec
+        if not self._gl_extension_supported(extension):
+            fallback = _GL_EXTENSION_FALLBACKS.get(extension)
+            if fallback is None or not self._gl_extension_supported(fallback):
+                return None
+
+        mips = texture.compressed_mips
+        has_mipmaps = len(mips) > 1
+        wrap_s, wrap_t = _vtex_wrap_modes(texture.flags)
+
+        tex_id = None
+        try:
+            tex_id = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tex_id)
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR_MIPMAP_LINEAR if has_mipmaps else GL_LINEAR,
+            )
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, len(mips) - 1)
+
+            for level, width, height, payload in mips:
+                glCompressedTexImage2D(
+                    GL_TEXTURE_2D, level, internal_format, width, height, 0,
+                    np.frombuffer(payload, dtype=np.uint8),
+                )
+            glBindTexture(GL_TEXTURE_2D, 0)
+        except Exception:
+            glBindTexture(GL_TEXTURE_2D, 0)
+            if tex_id:
+                try:
+                    glDeleteTextures(1, [tex_id])
+                except Exception:
+                    pass
+            return None
+        return tex_id
+
+    def _draw_shaded(self, offset, count, tex_id, material_name, props):
+        """Draw one material batch with the normal-mapped shader."""
+        program = self._ensure_model_shader()
+        if not program:
+            return False
+
+        maps = self.material_maps.get(material_name) or {}
+        normal_id = maps.get("normal")
+        ao_id = maps.get("ao")
+        uniforms = self._model_uniforms
+
+        glUseProgram(program)
+
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glUniform1i(uniforms["colorMap"], 0)
+
+        if normal_id:
+            glActiveTexture(GL_TEXTURE1)
+            glBindTexture(GL_TEXTURE_2D, normal_id)
+            glUniform1i(uniforms["normalMap"], 1)
+
+        if ao_id:
+            glActiveTexture(GL_TEXTURE2)
+            glBindTexture(GL_TEXTURE_2D, ao_id)
+            glUniform1i(uniforms["aoMap"], 2)
+
+        glUniform1i(uniforms["hasNormal"], 1 if normal_id else 0)
+        glUniform1i(uniforms["hasAo"], 1 if ao_id else 0)
+        glUniform1i(uniforms["aoChannel"], int(maps.get("ao_channel", 0)))
+        glUniform1i(uniforms["unlit"], 1 if props.get("selfillum") else 0)
+        glUniform1i(uniforms["alphaTest"], 1 if props.get("alphatest") else 0)
+        glUniform1f(uniforms["alphaThreshold"], 0.1)
+        glUniform1f(uniforms["aoStrength"], 0.75)
+        glUniform1f(uniforms["ambientStrength"], 0.25)
+        glUniform1f(uniforms["diffuseStrength"], 0.85)
+        glUniform3f(uniforms["lightDir"], _LIGHT_DIR[0], _LIGHT_DIR[1], _LIGHT_DIR[2])
+
+        color = props.get("color", (1.0, 1.0, 1.0, 1.0))
+        glUniform3f(uniforms["tint"], float(color[0]), float(color[1]), float(color[2]))
+
+        self.mesh.draw_range(offset, count, with_texcoords=True, with_colors=False)
+
+        glUseProgram(0)
+        glActiveTexture(GL_TEXTURE2)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        return True
 
     def _build_material_batches(self):
         self._material_batches = []
@@ -1259,11 +1704,38 @@ class Renderer:
                 checker_id = None
 
         if self._material_batches and self.mesh.has_texcoords:
+            blend = not self._is_source2_model()
+
             for mat_name, offset, count in self._material_batches:
                 props = self.material_props.get(mat_name, {})
 
                 if props.get("nodraw"):
                     continue
+
+                # Source 2 color maps can carry a mask in their alpha
+                # channel, so only blend the materials that ask for it.
+                if blend:
+                    glEnable(GL_BLEND)
+                elif props.get("translucent") or props.get("alphatest"):
+                    glEnable(GL_BLEND)
+                else:
+                    glDisable(GL_BLEND)
+
+                # Likewise, alpha test would discard most Source 2
+                # surfaces whose alpha is a mask instead of coverage.
+                if blend or props.get("alphatest"):
+                    glEnable(GL_ALPHA_TEST)
+                else:
+                    glDisable(GL_ALPHA_TEST)
+
+                # Keep the mask alpha out of the framebuffer alpha so the
+                # widget stays opaque when it is composited.
+                if self._is_source2_model() and not (
+                    props.get("translucent") or props.get("alphatest")
+                ):
+                    glColorMask(True, True, True, False)
+                else:
+                    glColorMask(True, True, True, True)
 
                 # Handle $nocull per material
                 if props.get("nocull"):
@@ -1301,6 +1773,10 @@ class Renderer:
                 color = props.get("color", (1.0, 1.0, 1.0, 1.0))
                 glColor4f(*color)
 
+                if tex_id and self._is_source2_model():
+                    if self._draw_shaded(offset, count, tex_id, mat_name, props):
+                        continue
+
                 if tex_id:
                     glEnable(GL_TEXTURE_2D)
                     glBindTexture(GL_TEXTURE_2D, tex_id)
@@ -1325,6 +1801,7 @@ class Renderer:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
 
         glPopMatrix()
+        glColorMask(True, True, True, True)
         glDisable(GL_ALPHA_TEST)
         glDisable(GL_BLEND)
         glDisable(GL_LIGHTING)

@@ -1,15 +1,14 @@
 """Source 2 compiled model (.vmdl_c) geometry import.
 
-Supports the v1 KV3 MDAT payload (LZ4 + node reader) and the MBUF
-(VBIB-layout) vertex/index buffers. Only complete draw calls are
-imported; this file's MDAT stream is short of its stated size
-(see viewer/temp/mds/SOURCE2_VMDL_FORMAT_NOTES.md), so trailing
-scene data (attachments, hitbox sets, morphs) is skipped with a
-metadata warning instead of failing the whole load.
+Uses the shared container/KV1 helpers for the MDAT payload and the
+MBUF (VBIB-layout) vertex/index buffers. Only complete draw calls are
+imported; trailing scene data (attachments, hitbox sets, morphs) is
+ignored.
 
-Skeleton, blend weights and textures are still open: vertices are
-parented to a single dummy root bone and materials carry the .vmat
-stem as their name.
+Skeleton, blend weights and animation are still open: vertices are
+parented to a single dummy root bone. Materials carry the .vmat stem as
+their name, and ``metadata["material_paths"]`` keeps the full resource
+path so the renderer can find the matching .vmat_c/.vtex_c textures.
 """
 
 import struct
@@ -23,225 +22,35 @@ from viewer.smd_parser import (
     SmdTriangle,
     SmdVertex,
 )
+from viewer.source2 import Source2Error, read_kv1, read_resource_blocks
 
-# KV3 v1 node types (BinaryKV3.NodeType.cs).
-_NULL = 1
-_BOOLEAN = 2
-_INT64 = 3
-_UINT64 = 4
-_DOUBLE = 5
-_STRING = 6
-_BLOB = 7
-_ARRAY = 8
-_OBJECT = 9
-_ARRAY_TYPED = 10
-_INT32 = 11
-_UINT32 = 12
-_BOOL_TRUE = 13
-_BOOL_FALSE = 14
-_INT64_ZERO = 15
-_INT64_ONE = 16
-_DOUBLE_ZERO = 17
-_DOUBLE_ONE = 18
-
-_SINGLETONS = {
-    _NULL: None,
-    _BOOL_TRUE: True,
-    _BOOL_FALSE: False,
-    _INT64_ZERO: 0,
-    _INT64_ONE: 1,
-    _DOUBLE_ZERO: 0.0,
-    _DOUBLE_ONE: 1.0,
-}
-
-_KV3_V1_MAGIC = 0x4B563301
-
-
-class _Truncated(Exception):
-    """Raised when the KV3 type/buffer streams run out mid-value."""
-
-
-def lz4_block_decompress(src: bytes) -> bytes:
-    """Decompress one raw LZ4 block (no frame header)."""
-    out = bytearray()
-    i = 0
-    n = len(src)
-    while i < n:
-        token = src[i]
-        i += 1
-        lit_len = token >> 4
-        if lit_len == 15:
-            while True:
-                if i >= n:
-                    raise MdlParseError("LZ4 stream truncated in literal length")
-                byte = src[i]
-                i += 1
-                lit_len += byte
-                if byte != 255:
-                    break
-        if i + lit_len > n:
-            raise MdlParseError("LZ4 stream truncated in literals")
-        out.extend(src[i:i + lit_len])
-        i += lit_len
-        if i >= n:
-            break
-        if i + 2 > n:
-            raise MdlParseError("LZ4 stream truncated in match offset")
-        offset = src[i] | (src[i + 1] << 8)
-        i += 2
-        if offset == 0 or offset > len(out):
-            raise MdlParseError(f"Bad LZ4 match offset {offset}")
-        match_len = (token & 0xF) + 4
-        if (token & 0xF) == 15:
-            while True:
-                if i >= n:
-                    raise MdlParseError("LZ4 stream truncated in match length")
-                byte = src[i]
-                i += 1
-                match_len += byte
-                if byte != 255:
-                    break
-        for _ in range(match_len):
-            out.append(out[len(out) - offset])
-    return bytes(out)
-
-
-class _V1Reader:
-    """Minimal KV3 v1 pull reader over one decompressed blob."""
-
-    def __init__(self, buf: bytes, count4: int, count8: int) -> None:
-        self.b4 = bytearray(buf[0:count4 * 4])
-        self.b8 = bytearray(buf[count4 * 4:count4 * 4 + count8 * 8])
-        self.b1 = bytearray()
-        self.strings: List[str] = []
-        pos = count4 * 4 + count8 * 8
-        count_strings = self._take4()
-        for _ in range(count_strings):
-            end = buf.find(b"\x00", pos)
-            if end < 0:
-                raise _Truncated("string table overruns buffer")
-            self.strings.append(buf[pos:end].decode("utf-8", errors="replace"))
-            pos = end + 1
-        self.types = bytearray(buf[pos:])
-        self.draws: List[Dict[str, Any]] = []
-
-    def _take4(self) -> int:
-        if len(self.b4) < 4:
-            raise _Truncated("Bytes4 exhausted")
-        value = struct.unpack_from("<i", self.b4, 0)[0]
-        del self.b4[:4]
-        return value
-
-    def _take8(self, fmt: str) -> Any:
-        if len(self.b8) < 8:
-            raise _Truncated("Bytes8 exhausted")
-        value = struct.unpack(fmt, self.b8[:8])[0]
-        del self.b8[:8]
-        return value
-
-    def _read_type(self) -> int:
-        if not self.types:
-            raise _Truncated("type stream exhausted")
-        node = self.types.pop(0)
-        if node & 0x80:
-            node &= 0x7F
-            if not self.types:
-                raise _Truncated("type flag byte missing")
-            self.types.pop(0)
-        return node
-
-    def _string_value(self, sid: int) -> str:
-        if sid == -1:
-            return ""
-        if sid < 0 or sid >= len(self.strings):
-            raise _Truncated(f"bad string id {sid}")
-        return self.strings[sid]
-
-    def read_value(self, node: int) -> Any:
-        if node in _SINGLETONS:
-            return _SINGLETONS[node]
-        if node == _BOOLEAN:
-            raise _Truncated("non-singleton boolean needs Bytes1")
-        if node in (_INT32, _UINT32):
-            return self._take4()
-        if node == _STRING:
-            return self._string_value(self._take4())
-        if node == _BLOB:
-            length = self._take4()
-            if length != 0:
-                raise _Truncated("non-empty v1 blob needs Bytes1")
-            return b""
-        if node == _ARRAY:
-            return [self.read_member(True) for _ in range(self._take4())]
-        if node == _ARRAY_TYPED:
-            count = self._take4()
-            sub = self._read_type()
-            return [self.read_value(sub) for _ in range(count)]
-        if node == _OBJECT:
-            obj: Dict[str, Any] = {}
-            for _ in range(self._take4()):
-                key, value = self.read_member(False)
-                obj[key] = value
-            if "m_nIndexCount" in obj and "m_nVertexCount" in obj:
-                self.draws.append(obj)
-            return obj
-        if node in (_INT64, _UINT64):
-            return self._take8("<q")
-        if node == _DOUBLE:
-            return self._take8("<d")
-        raise MdlParseError(f"Unsupported KV3 v1 node type {node}")
-
-    def read_member(self, in_array: bool) -> Any:
-        node = self._read_type()
-        if in_array:
-            return self.read_value(node)
-        name = self._string_value(self._take4())
-        return name, self.read_value(node)
-
-
-def _read_blocks(data: bytes) -> Dict[str, Tuple[int, int]]:
-    blocks: Dict[str, Tuple[int, int]] = {}
-    for i in range(8):
-        off = 16 + i * 12
-        if off + 12 > len(data):
-            break
-        tag = data[off:off + 4].decode("ascii", errors="replace")
-        boff, bsize = struct.unpack_from("<2I", data, off + 4)
-        if 0 <= boff < len(data) and 0 < bsize <= len(data):
-            blocks[tag] = (boff, min(bsize, len(data) - boff))
-    return blocks
+_KV3_V1_MAGIC = b"\x01\x33\x56\x4b"
 
 
 def _parse_mdat_draws(blob: bytes) -> Tuple[List[Dict[str, Any]], bool]:
-    """Decompress one v1 MDAT blob, return complete draw calls + truncated flag."""
-    if len(blob) < 40 or struct.unpack_from("<I", blob, 0)[0] != _KV3_V1_MAGIC:
-        raise MdlParseError("MDAT KV3 blob is not version 1")
-    _guid = blob[4:20]
-    compression, c1, c4, c8, _utotal = struct.unpack_from("<5I", blob, 20)
-    if compression != 1:
-        raise MdlParseError(f"Unsupported KV3 v1 compression {compression}")
-    if c1 != 0:
-        raise MdlParseError("Unexpected Bytes1 content in MDAT blob")
-    payload = blob[40:]
-    buf = lz4_block_decompress(payload)
-    reader = _V1Reader(buf, c4, c8)
-    truncated = False
+    """Decode one v1 MDAT blob, return complete draw calls + truncated flag."""
+    draws: List[Dict[str, Any]] = []
+
+    def collect(obj: Dict[str, Any]) -> None:
+        if "m_nIndexCount" in obj and "m_nVertexCount" in obj:
+            draws.append(obj)
+
     try:
-        root_type = reader._read_type()
-        if root_type != _OBJECT:
-            raise MdlParseError(f"MDAT root is not an object (type {root_type})")
-        root = reader.read_value(root_type)
-        if not isinstance(root, dict):
-            raise MdlParseError("MDAT root did not parse to an object")
-    except _Truncated:
-        truncated = True
-    draws = [d for d in reader.draws if isinstance(d, dict)]
+        _root, truncated = read_kv1(
+            blob, on_object=collect, tolerate_truncation=True
+        )
+    except Source2Error as error:
+        raise MdlParseError(str(error)) from error
     return draws, truncated
 
 
 def _material_stem(path: str) -> str:
     stem = path.replace("\\", "/").rsplit("/", 1)[-1]
-    return stem[:-5] if stem.lower().endswith(".vmat") else stem or "vmdl"
+    lowered = stem.lower()
+    for suffix in (".vmat_c", ".vmat"):
+        if lowered.endswith(suffix):
+            return stem[:-len(suffix)] or "vmdl"
+    return stem or "vmdl"
 
 
 def _decode_buffers(
@@ -281,17 +90,117 @@ def _find_mbuf_table(mbuf: bytes) -> int:
     raise MdlParseError("MBUF buffer table not found")
 
 
+_INPUT_ATTRIBUTE_FORMAT = 36
+_INPUT_ATTRIBUTE_OFFSET = 40
+
+# DXGI_FORMAT values used by Source 2 vertex layouts.
+_DXGI_R32G32B32_FLOAT = 6
+_DXGI_R32G32_FLOAT = 16
+_DXGI_R10G10B10A2_UNORM = 26
+_DXGI_R8G8B8A8_UNORM = 28
+_DXGI_R8G8B8A8_SNORM = 31
+_DXGI_R16G16_FLOAT = 34
+_DXGI_R16G16_UNORM = 35
+_DXGI_R16G16_SNORM = 37
+
+
+def _read_input_layout(mbuf: bytes) -> Dict[str, Tuple[int, int]]:
+    """Return {attribute_name: (dxgi_format, byte_offset)} for one VBIB."""
+    layout: Dict[str, Tuple[int, int]] = {}
+    for name in ("POSITION", "TEXCOORD", "NORMAL", "BLENDINDICES", "BLENDWEIGHT"):
+        index = mbuf.find(name.encode("ascii"), 0, 4096)
+        if index < 0 or index + _INPUT_ATTRIBUTE_OFFSET + 4 > len(mbuf):
+            continue
+        fmt, offset = struct.unpack_from(
+            "<II", mbuf, index + _INPUT_ATTRIBUTE_FORMAT
+        )
+        layout[name] = (fmt, offset)
+    return layout
+
+
+def _decode_texcoord(
+    vdata: bytes, offset: int, fmt: int
+) -> Tuple[float, float]:
+    if fmt == _DXGI_R16G16_FLOAT:
+        return struct.unpack_from("<2e", vdata, offset)
+    if fmt == _DXGI_R32G32_FLOAT:
+        return struct.unpack_from("<2f", vdata, offset)
+    if fmt == _DXGI_R16G16_SNORM:
+        x, y = struct.unpack_from("<2h", vdata, offset)
+        return (x / 32767.0, y / 32767.0)
+    # R16G16_UNORM and unknown layouts fall back to normalised shorts.
+    x, y = struct.unpack_from("<2H", vdata, offset)
+    return (x / 65535.0, y / 65535.0)
+
+
+def _decode_normal(
+    vdata: bytes, offset: int, fmt: int
+) -> Tuple[float, float, float]:
+    if fmt == _DXGI_R8G8B8A8_SNORM:
+        x, y, z = struct.unpack_from("<3b", vdata, offset)
+        return (x / 127.0, y / 127.0, z / 127.0)
+    if fmt == _DXGI_R10G10B10A2_UNORM:
+        packed, = struct.unpack_from("<I", vdata, offset)
+        return (
+            (packed & 0x3FF) / 1023.0 * 2.0 - 1.0,
+            ((packed >> 10) & 0x3FF) / 1023.0 * 2.0 - 1.0,
+            ((packed >> 20) & 0x3FF) / 1023.0 * 2.0 - 1.0,
+        )
+    nx, ny, nz, _nw = vdata[offset:offset + 4]
+    return (nx / 255 * 2 - 1, ny / 255 * 2 - 1, nz / 255 * 2 - 1)
+
+
+def _rebuild_smooth_normals(model: SmdModel) -> None:
+    """Replace vertex normals with area-weighted geometric normals.
+
+    The NORMAL stream in these files does not decode into a usable
+    surface normal (roughly a fifth of the faces agree with it), while
+    the geometry itself is sound. Rebuilding from the triangles gives
+    consistent lighting and a usable tangent frame for normal maps.
+    """
+    if not model.vertices or not model.triangles:
+        return
+
+    positions = [vertex.position for vertex in model.vertices]
+    accumulators = [[0.0, 0.0, 0.0] for _ in positions]
+
+    for triangle in model.triangles:
+        i0, i1, i2 = triangle.indices
+        x0, y0, z0 = positions[i0]
+        x1, y1, z1 = positions[i1]
+        x2, y2, z2 = positions[i2]
+        ux, uy, uz = x1 - x0, y1 - y0, z1 - z0
+        vx, vy, vz = x2 - x0, y2 - y0, z2 - z0
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        for index in (i0, i1, i2):
+            accumulator = accumulators[index]
+            accumulator[0] += nx
+            accumulator[1] += ny
+            accumulator[2] += nz
+
+    for vertex, (ax, ay, az) in zip(model.vertices, accumulators):
+        length = (ax * ax + ay * ay + az * az) ** 0.5
+        if length < 1e-12:
+            continue
+        vertex.normal = (ax / length, ay / length, az / length)
+
+
 def parse_vmdl_c(path: str) -> SmdModel:
     """Parse a Source 2 compiled model into an SmdModel (static geometry)."""
     with open(path, "rb") as handle:
         data = handle.read()
 
-    blocks = _read_blocks(data)
+    try:
+        blocks = read_resource_blocks(data)
+    except Source2Error as error:
+        raise MdlParseError(str(error)) from error
     if "MDAT" not in blocks or "MBUF" not in blocks:
         raise MdlParseError("Not a Source 2 model: MDAT/MBUF blocks missing")
 
     mdat_off, mdat_size = blocks["MDAT"]
-    magic_at = data.find(b"\x01\x33\x56\x4b", mdat_off, mdat_off + 128)
+    magic_at = data.find(_KV3_V1_MAGIC, mdat_off, mdat_off + 128)
     if magic_at < 0:
         raise MdlParseError("MDAT KV3 blob magic not found")
     draws, truncated = _parse_mdat_draws(data[magic_at:mdat_off + mdat_size])
@@ -303,12 +212,17 @@ def parse_vmdl_c(path: str) -> SmdModel:
     table = _find_mbuf_table(mbuf)
     vb_off_tbl, _vb_n, ib_off_tbl, _ib_n = struct.unpack_from(
         "<4I", mbuf, table)
+    layout = _read_input_layout(mbuf)
+    position_offset = layout.get("POSITION", (_DXGI_R32G32B32_FLOAT, 0))[1]
+    texcoord_format, texcoord_offset = layout.get("TEXCOORD", (_DXGI_R16G16_UNORM, 12))
+    normal_format, normal_offset = layout.get("NORMAL", (_DXGI_R8G8B8A8_UNORM, 16))
 
     model = SmdModel()
     model.bones.append(SmdBone(bone_id=0, name="root", parent_id=-1))
     model.frames.append(SmdFrame(time=0, transforms={0: ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))}))
     model.frame_names[0] = "bind"
     model.has_geometry = True
+    material_paths: Dict[str, str] = {}
 
     for draw in draws:
         vbuf_id = int(draw["m_vertexBuffers"][0]["m_hBuffer"])
@@ -326,16 +240,19 @@ def parse_vmdl_c(path: str) -> SmdModel:
             raise MdlParseError(f"Unexpected vertex stride {stride}")
         material = _material_stem(str(draw.get("m_material", "")))
         model.materials.add(material)
+        raw_material = str(draw.get("m_material", "")).replace("\\", "/").strip()
+        if material and raw_material:
+            material_paths.setdefault(material, raw_material)
         for v in range(nverts):
             off = v * stride
-            pos = struct.unpack_from("<3f", vdata, off)
-            u0, v0 = struct.unpack_from("<2H", vdata, off + 12)
-            nx, ny, nz, _nw = vdata[off + 16:off + 20]
+            pos = struct.unpack_from("<3f", vdata, off + position_offset)
+            u0, v0 = _decode_texcoord(vdata, off + texcoord_offset, texcoord_format)
+            normal = _decode_normal(vdata, off + normal_offset, normal_format)
             model.vertices.append(SmdVertex(
                 parent_bone=0,
                 position=(pos[0], pos[1], pos[2]),
-                normal=(nx / 255 * 2 - 1, ny / 255 * 2 - 1, nz / 255 * 2 - 1),
-                uv=(u0 / 65535.0, v0 / 65535.0),
+                normal=normal,
+                uv=(u0, v0),
                 links=[],
             ))
         idx = struct.unpack_from(f"<{nindex}H", idata, 0)
@@ -347,6 +264,8 @@ def parse_vmdl_c(path: str) -> SmdModel:
                 indices=(base + idx[t], base + idx[t + 1], base + idx[t + 2]),
             ))
 
+    _rebuild_smooth_normals(model)
+
     if model.vertices:
         xs = [v.position[0] for v in model.vertices]
         ys = [v.position[1] for v in model.vertices]
@@ -356,6 +275,7 @@ def parse_vmdl_c(path: str) -> SmdModel:
 
     model.metadata["source"] = "vmdl_c"
     model.metadata["draw_calls"] = len(draws)
+    model.metadata["material_paths"] = material_paths
     if truncated:
         model.metadata["vmdl_truncated_tail"] = True
     return model

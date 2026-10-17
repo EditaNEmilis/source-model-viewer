@@ -2,6 +2,23 @@
 
 Changelog of each versions.
 
+## [0.8.0] | Source 2 textures
+
+### Added
+- `.vtex_c` import: texture header, extra-data table and full mip chain, including LZ4-compressed mips. DXT1, DXT5, BC4, BC5 and BC7 upload as compressed GL textures; RGBA8888, BGRA8888, I8, IA88, A8 and R8 decode to RGBA.
+- `.vmat_c` import: shader name and parameter arrays, so each Source 2 draw call resolves its base color map through `g_tColor` / `TextureColor`.
+- VMDL draws record their full material resource paths, and the renderer resolves `.vmat_c` then `.vtex_c` from the mounted materials folder.
+- VMDL vertex layouts are read from the MBUF attribute table (format and offset per attribute), so half-float TEXCOORD streams decode correctly.
+- Source 2 surfaces are shaded by a small GLSL program: diffuse lighting, normal maps from `g_tNormal` (BC5 or BC7) and ambient occlusion from `g_tAmbientOcclusion` or the green channel of `g_tCombinedMasks`. Fixed-function rendering remains the fallback when the shader cannot compile.
+- VTEX clamp flags now drive texture wrap modes, so UVs that leave 0..1 wrap instead of clamping.
+
+### Fixed
+- KV3 v1 decoding now handles both string-table placements found in compiled resources; VMAT payloads previously failed with an unsupported node type.
+- Resource block offsets are resolved from the offset field address instead of the block table start.
+- LZ4 block decompression copies literals and matches in slices instead of byte loops.
+- Source 2 materials no longer inherit Source 1 alpha test and blending, which discarded or washed out surfaces whose alpha channel is a mask. Opaque Source 2 materials also leave the framebuffer alpha untouched.
+- VMDL vertex normals are rebuilt from the triangle geometry. The NORMAL stream in these files does not decode into a usable surface normal, which produced blotchy lighting and an unusable tangent frame.
+
 ## [0.7.0] | Improvement works
 
 ### Added
