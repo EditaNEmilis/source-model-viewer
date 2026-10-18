@@ -431,7 +431,10 @@ class MainWindow(QMainWindow):
 
         self._set_animation_clips([])
         self.viewport.set_model(parsed)
-        self.viewport.set_animation_targets([])
+
+        targets = getattr(parsed, "vertex_targets", []) or []
+        self.animation_targets = targets
+        self.viewport.set_animation_targets(targets)
 
         clips = parsed.metadata.get("animation_clips") or []
         self._set_animation_clips(clips)
@@ -441,9 +444,14 @@ class MainWindow(QMainWindow):
             msg += f" (Mounted materials: {auto_mat})"
         if clips:
             msg += f" and {len(clips)} animation clips"
+        if len(targets) > 1:
+            msg += f" and {len(targets) - 1} shape keys"
         anim_error = parsed.metadata.get("animation_error")
         if anim_error:
             msg += f" (animation error: {anim_error})"
+        morph_error = parsed.metadata.get("morph_error")
+        if morph_error:
+            msg += f" (morphs: {morph_error})"
         if parsed.metadata.get("vmdl_truncated_tail"):
             msg += " (partial: trailing Source 2 scene data skipped)"
         self.statusBar().showMessage(msg)

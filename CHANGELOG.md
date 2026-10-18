@@ -19,6 +19,13 @@ Changelog of each versions.
 - Source 2 materials no longer inherit Source 1 alpha test and blending, which discarded or washed out surfaces whose alpha channel is a mask. Opaque Source 2 materials also leave the framebuffer alpha untouched.
 - VMDL vertex normals are rebuilt from the triangle geometry. The NORMAL stream in these files does not decode into a usable surface normal, which produced blotchy lighting and an unusable tangent frame.
 
+### [0.8.1]
+
+#### Added
+- VMDL skeletons: the `m_skeleton` bone hierarchy, inverse bind poses and per-vertex blend indices/weights feed the existing rig, skeleton overlay and skinning pipeline. Bind-pose skinning reproduces the original vertex positions.
+- VMDL morph sets: `MRPH` parsing, atlas delta decoding and 98 shape keys in the existing Shape Key Mode
+- VMDL models accept external SMD sequences through the existing rig
+
 ## [0.7.0] | Improvement works
 
 ### Added

@@ -5,30 +5,49 @@ MBUF (VBIB-layout) vertex/index buffers. Only complete draw calls are
 imported; trailing scene data (attachments, hitbox sets, morphs) is
 ignored.
 
-Skeleton, blend weights and animation are still open: vertices are
-parented to a single dummy root bone. Materials carry the .vmat stem as
-their name, and ``metadata["material_paths"]`` keeps the full resource
-path so the renderer can find the matching .vmat_c/.vtex_c textures.
+The bone hierarchy and bind pose come from ``m_skeleton`` in the MDAT
+root, and per-vertex blend indices/weights from the VBIB layout, so
+VMDL models take part in the existing skeleton, skinning and animation
+pipeline. Animation blocks are still open. Materials carry the .vmat
+stem as their name, and ``metadata["material_paths"]`` keeps the full
+resource path so the renderer can find the matching .vmat_c/.vtex_c
+textures.
 """
 
+import math
+import os
 import struct
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from viewer.mdl_parser import MdlParseError
+from viewer.morph_parser import (
+    MorphError,
+    NORMAL_WRINKLE,
+    POSITION_SPEED,
+    decode_deltas,
+    parse_morph_block,
+)
+from viewer.skeleton import invert_affine_matrix, multiply_matrices
 from viewer.smd_parser import (
     SmdBone,
     SmdFrame,
     SmdModel,
     SmdTriangle,
     SmdVertex,
+    VertexTarget,
 )
 from viewer.source2 import Source2Error, read_kv1, read_resource_blocks
+from viewer.vtex_parser import VtexError, parse_vtex_c
 
 _KV3_V1_MAGIC = b"\x01\x33\x56\x4b"
 
 
-def _parse_mdat_draws(blob: bytes) -> Tuple[List[Dict[str, Any]], bool]:
-    """Decode one v1 MDAT blob, return complete draw calls + truncated flag."""
+def _parse_mdat_draws(
+    blob: bytes,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
+    """Decode one v1 MDAT blob, return draw calls + root + truncated flag."""
     draws: List[Dict[str, Any]] = []
 
     def collect(obj: Dict[str, Any]) -> None:
@@ -36,12 +55,12 @@ def _parse_mdat_draws(blob: bytes) -> Tuple[List[Dict[str, Any]], bool]:
             draws.append(obj)
 
     try:
-        _root, truncated = read_kv1(
+        root, truncated = read_kv1(
             blob, on_object=collect, tolerate_truncation=True
         )
     except Source2Error as error:
         raise MdlParseError(str(error)) from error
-    return draws, truncated
+    return draws, root, truncated
 
 
 def _material_stem(path: str) -> str:
@@ -51,6 +70,115 @@ def _material_stem(path: str) -> str:
         if lowered.endswith(suffix):
             return stem[:-len(suffix)] or "vmdl"
     return stem or "vmdl"
+
+
+def _matrix_from_inv_bind(values) -> Tuple[float, ...]:
+    """Expand a 3x4 row-major inverse bind pose into a 4x4 matrix."""
+    if not isinstance(values, list) or len(values) < 12:
+        return (1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0)
+    x = [float(value) for value in values[:12]]
+    return (
+        x[0], x[1], x[2], x[3],
+        x[4], x[5], x[6], x[7],
+        x[8], x[9], x[10], x[11],
+        0.0, 0.0, 0.0, 1.0,
+    )
+
+
+def _decompose_transform(matrix: Tuple[float, ...]):
+    """Split an affine matrix into position and SMD style Euler angles."""
+    m00, m01, m02, tx = matrix[0], matrix[1], matrix[2], matrix[3]
+    m10, m11, m12, ty = matrix[4], matrix[5], matrix[6], matrix[7]
+    m20, m21, m22, tz = matrix[8], matrix[9], matrix[10], matrix[11]
+
+    sy = -max(-1.0, min(1.0, m20))
+    ry = math.asin(sy)
+    cy = math.cos(ry)
+
+    if abs(cy) > 1e-6:
+        rx = math.atan2(m21, m22)
+        rz = math.atan2(m10, m00)
+    else:
+        rx = math.atan2(-m12, m11)
+        rz = 0.0
+
+    return ((tx, ty, tz), (rx, ry, rz))
+
+
+def _parse_skeleton(root: Optional[Dict[str, Any]]):
+    """Return (bones, bind transforms) from the MDAT skeleton block.
+
+    ``m_invBindPose`` stores model-space inverse bind matrices in a 3x4
+    row-major layout. Inverting and rebasing them onto each parent gives
+    the parent-space transforms the rest of the viewer expects.
+    """
+    skeleton = (root or {}).get("m_skeleton") or {}
+    entries = skeleton.get("m_bones") or []
+    if not isinstance(entries, list) or not entries:
+        return [], {}
+
+    names: List[str] = []
+    name_to_id: Dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        name = str(entry.get("m_boneName") or f"bone_{index}")
+        names.append(name)
+        name_to_id.setdefault(name, index)
+
+    bones: List[SmdBone] = []
+    for index, entry in enumerate(entries):
+        parent_name = str(entry.get("m_parentName") or "")
+        parent_id = name_to_id.get(parent_name, -1) if parent_name else -1
+        if parent_id == index:
+            parent_id = -1
+        bones.append(SmdBone(bone_id=index, name=names[index], parent_id=parent_id))
+
+    world: Dict[int, Tuple[float, ...]] = {}
+    for index, entry in enumerate(entries):
+        inv_bind = _matrix_from_inv_bind(entry.get("m_invBindPose"))
+        world[index] = invert_affine_matrix(inv_bind)
+
+    transforms = {}
+    for bone in bones:
+        parent_id = bone.parent_id
+        if parent_id >= 0 and parent_id in world:
+            parent_inverse = invert_affine_matrix(world[parent_id])
+            local = multiply_matrices(parent_inverse, world[bone.bone_id])
+        else:
+            local = world[bone.bone_id]
+        transforms[bone.bone_id] = _decompose_transform(local)
+    return bones, transforms
+
+
+def _decode_vertex_links(
+    vdata: bytes,
+    index_offset: int,
+    weight_offset: int,
+    bone_count: int,
+) -> List[Tuple[int, float]]:
+    """Read up to four blend influences from one vertex record."""
+    if bone_count <= 0:
+        return []
+    indices = vdata[index_offset:index_offset + 4]
+    weights = vdata[weight_offset:weight_offset + 4]
+    if len(indices) < 4 or len(weights) < 4:
+        return []
+
+    links: List[Tuple[int, float]] = []
+    total = 0.0
+    for slot in range(4):
+        weight = weights[slot] / 255.0
+        bone_id = indices[slot]
+        if weight <= 0.0 or bone_id >= bone_count:
+            continue
+        links.append((bone_id, weight))
+        total += weight
+
+    if total <= 1e-6:
+        return []
+    return [(bone_id, weight / total) for bone_id, weight in links]
 
 
 def _decode_buffers(
@@ -187,6 +315,114 @@ def _rebuild_smooth_normals(model: SmdModel) -> None:
         vertex.normal = (ax / length, ay / length, az / length)
 
 
+def _resolve_morph_atlas(reference: str, model_path: str) -> Optional[str]:
+    if not reference:
+        return None
+    base = os.path.dirname(os.path.abspath(model_path))
+    relative = reference.replace("\\", "/").strip()
+    candidates = [relative + "_c"]
+    if not relative.lower().endswith((".vtex", ".vtex_c")):
+        candidates.append(relative)
+    for candidate in candidates:
+        path = os.path.join(base, candidate)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _attach_morph_targets(
+    model: SmdModel,
+    blocks: Dict[str, Tuple[int, int]],
+    data: bytes,
+    model_path: str,
+) -> None:
+    """Decode the MRPH morph set into vertex targets (shape keys)."""
+    start, size = blocks["MRPH"]
+    morph_set = parse_morph_block(data[start:start + size])
+    model.metadata["morph_count"] = len(morph_set.morphs)
+    model.metadata["flex_controllers"] = [
+        controller["name"] for controller in morph_set.flex_controllers
+    ]
+    model.metadata["morph_atlas"] = morph_set.atlas_path
+
+    atlas_path = _resolve_morph_atlas(morph_set.atlas_path, model_path)
+    if atlas_path is None:
+        model.metadata["morph_error"] = (
+            f"morph atlas not found: {morph_set.atlas_path}"
+        )
+        return
+
+    try:
+        atlas = parse_vtex_c(atlas_path)
+    except (VtexError, OSError) as error:
+        model.metadata["morph_error"] = str(error)
+        return
+
+    if atlas.rgba is None:
+        model.metadata["morph_error"] = "morph atlas has no RGBA pixels"
+        return
+
+    position_deltas = decode_deltas(morph_set, atlas.rgba, POSITION_SPEED)
+    normal_deltas = decode_deltas(morph_set, atlas.rgba, NORMAL_WRINKLE)
+
+    vertex_count = len(model.vertices)
+    base_positions = np.array(
+        [vertex.position for vertex in model.vertices], dtype=np.float32
+    )
+    base_normals = np.array(
+        [vertex.normal for vertex in model.vertices], dtype=np.float32
+    )
+
+    targets = [VertexTarget(time=0, overrides={}, name="bind")]
+
+    for index, morph in enumerate(morph_set.morphs, start=1):
+        position_entry = position_deltas.get(morph.name)
+        if position_entry is None:
+            continue
+
+        ids, deltas = position_entry
+        valid = ids < vertex_count
+        if not valid.all():
+            ids, deltas = ids[valid], deltas[valid]
+        positions = (base_positions[ids] + deltas).tolist()
+        normals = base_normals[ids].tolist()
+
+        normal_entry = normal_deltas.get(morph.name)
+        normal_map: Dict[int, Tuple[float, float, float]] = {}
+        if normal_entry is not None:
+            normal_ids, normal_values = normal_entry
+            normal_valid = normal_ids < vertex_count
+            if not normal_valid.all():
+                normal_ids = normal_ids[normal_valid]
+                normal_values = normal_values[normal_valid]
+            normal_map = {
+                int(vertex_id): (float(value[0]), float(value[1]), float(value[2]))
+                for vertex_id, value in zip(normal_ids.tolist(), normal_values.tolist())
+            }
+
+        overrides = {}
+        for vertex_id, position, normal in zip(ids.tolist(), positions, normals):
+            delta = normal_map.get(vertex_id)
+            if delta is not None:
+                nx = normal[0] + delta[0]
+                ny = normal[1] + delta[1]
+                nz = normal[2] + delta[2]
+                length = (nx * nx + ny * ny + nz * nz) ** 0.5
+                if length > 1e-6:
+                    normal = (nx / length, ny / length, nz / length)
+            overrides[int(vertex_id)] = (
+                (float(position[0]), float(position[1]), float(position[2])),
+                (float(normal[0]), float(normal[1]), float(normal[2])),
+            )
+
+        if overrides:
+            targets.append(VertexTarget(time=index, overrides=overrides, name=morph.name))
+
+    if len(targets) > 1:
+        model.vertex_targets.extend(targets)
+    model.metadata["shape_keys"] = len(targets) - 1
+
+
 def parse_vmdl_c(path: str) -> SmdModel:
     """Parse a Source 2 compiled model into an SmdModel (static geometry)."""
     with open(path, "rb") as handle:
@@ -203,7 +439,7 @@ def parse_vmdl_c(path: str) -> SmdModel:
     magic_at = data.find(_KV3_V1_MAGIC, mdat_off, mdat_off + 128)
     if magic_at < 0:
         raise MdlParseError("MDAT KV3 blob magic not found")
-    draws, truncated = _parse_mdat_draws(data[magic_at:mdat_off + mdat_size])
+    draws, mdat_root, truncated = _parse_mdat_draws(data[magic_at:mdat_off + mdat_size])
     if not draws:
         raise MdlParseError("No complete draw calls in MDAT blob")
 
@@ -216,10 +452,20 @@ def parse_vmdl_c(path: str) -> SmdModel:
     position_offset = layout.get("POSITION", (_DXGI_R32G32B32_FLOAT, 0))[1]
     texcoord_format, texcoord_offset = layout.get("TEXCOORD", (_DXGI_R16G16_UNORM, 12))
     normal_format, normal_offset = layout.get("NORMAL", (_DXGI_R8G8B8A8_UNORM, 16))
+    blend_indices_format, blend_indices_offset = layout.get(
+        "BLENDINDICES", (30, 20)
+    )
+    _blend_weight_format, blend_weight_offset = layout.get("BLENDWEIGHT", (28, 24))
+
+    bones, bind_transforms = _parse_skeleton(mdat_root)
+    if not bones:
+        bones = [SmdBone(bone_id=0, name="root", parent_id=-1)]
+        bind_transforms = {0: ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))}
+    bone_ids = {bone.bone_id for bone in bones}
 
     model = SmdModel()
-    model.bones.append(SmdBone(bone_id=0, name="root", parent_id=-1))
-    model.frames.append(SmdFrame(time=0, transforms={0: ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0))}))
+    model.bones.extend(bones)
+    model.frames.append(SmdFrame(time=0, transforms=bind_transforms))
     model.frame_names[0] = "bind"
     model.has_geometry = True
     material_paths: Dict[str, str] = {}
@@ -248,12 +494,21 @@ def parse_vmdl_c(path: str) -> SmdModel:
             pos = struct.unpack_from("<3f", vdata, off + position_offset)
             u0, v0 = _decode_texcoord(vdata, off + texcoord_offset, texcoord_format)
             normal = _decode_normal(vdata, off + normal_offset, normal_format)
+            links = []
+            if blend_indices_format in (30, 28, 31):
+                links = _decode_vertex_links(
+                    vdata,
+                    off + blend_indices_offset,
+                    off + blend_weight_offset,
+                    len(bones),
+                )
+            parent_bone = links[0][0] if links else (0 if 0 in bone_ids else -1)
             model.vertices.append(SmdVertex(
-                parent_bone=0,
+                parent_bone=parent_bone,
                 position=(pos[0], pos[1], pos[2]),
                 normal=normal,
                 uv=(u0, v0),
-                links=[],
+                links=links,
             ))
         idx = struct.unpack_from(f"<{nindex}H", idata, 0)
         if max(idx) >= nverts:
@@ -266,6 +521,12 @@ def parse_vmdl_c(path: str) -> SmdModel:
 
     _rebuild_smooth_normals(model)
 
+    if "MRPH" in blocks:
+        try:
+            _attach_morph_targets(model, blocks, data, path)
+        except (MorphError, Source2Error, ValueError) as error:
+            model.metadata["morph_error"] = str(error)
+
     if model.vertices:
         xs = [v.position[0] for v in model.vertices]
         ys = [v.position[1] for v in model.vertices]
@@ -276,6 +537,17 @@ def parse_vmdl_c(path: str) -> SmdModel:
     model.metadata["source"] = "vmdl_c"
     model.metadata["draw_calls"] = len(draws)
     model.metadata["material_paths"] = material_paths
+
+    animation_blocks = [
+        tag for tag in ("ANIM", "ASEQ", "AGRG") if tag in blocks
+    ]
+    if animation_blocks:
+        model.metadata["animation_error"] = (
+            "embedded Source 2 animation blocks are not decoded yet ("
+            + ", ".join(animation_blocks)
+            + ")"
+        )
+
     if truncated:
         model.metadata["vmdl_truncated_tail"] = True
     return model
