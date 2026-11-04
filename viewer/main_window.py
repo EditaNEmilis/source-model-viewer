@@ -2,13 +2,14 @@ import os
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtCore import QCoreApplication, QSettings
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Source Model Viewer")
         self.resize(1024, 768)
+        self._geometry_restored = False
 
         self.animation_targets = []
         self.flex_info = None
@@ -61,6 +63,7 @@ class MainWindow(QMainWindow):
         controls = QFrame()
         controls.setFrameShape(QFrame.StyledPanel)
         controls.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.controls_frame = controls
 
         controls_layout = QGridLayout(controls)
         controls_layout.setContentsMargins(6, 4, 6, 4)
@@ -68,6 +71,45 @@ class MainWindow(QMainWindow):
 
         self.play_button = QPushButton("Play")
         self.play_button.setEnabled(False)
+        self.play_button.setToolTip("Play or pause the active animation (Space)")
+
+        self.first_frame_button = QPushButton("|<")
+        self.prev_frame_button = QPushButton("<")
+        self.next_frame_button = QPushButton(">")
+        self.last_frame_button = QPushButton(">|")
+        for step_button in (
+            self.first_frame_button,
+            self.prev_frame_button,
+            self.next_frame_button,
+            self.last_frame_button,
+        ):
+            step_button.setFixedWidth(30)
+            step_button.setEnabled(False)
+        self.first_frame_button.setToolTip("Jump to the first frame (Home)")
+        self.prev_frame_button.setToolTip("Step one frame back (Left)")
+        self.next_frame_button.setToolTip("Step one frame forward (Right)")
+        self.last_frame_button.setToolTip("Jump to the last frame (End)")
+        for button in (
+            self.play_button,
+            self.first_frame_button,
+            self.prev_frame_button,
+            self.next_frame_button,
+            self.last_frame_button,
+        ):
+            button.setAutoDefault(False)
+
+        self.loop_check = QCheckBox("Loop")
+        self.loop_check.setChecked(True)
+        self.loop_check.setToolTip("Wrap playback at the end (on by default)")
+
+        self.clip_info_label = QLabel("")
+        self.clip_info_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.clip_info_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.clip_info_label.setToolTip("Selected clip: frames, fps, duration, looping")
+
+        self.model_info_label = QLabel("")
+        self.model_info_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.model_info_label.setToolTip("Loaded model: triangles, bones, materials, clips")
 
         self.progress_slider = QSlider(Qt.Horizontal)
         self.progress_slider.setEnabled(False)
@@ -116,7 +158,29 @@ class MainWindow(QMainWindow):
         self.sequence_slider.setPageStep(100)
         self.sequence_slider.valueChanged.connect(self.sequence_progress_changed)
 
-        controls_layout.addWidget(self.play_button, 0, 0, 2, 1)
+        transport = QWidget()
+        transport_layout = QHBoxLayout(transport)
+        transport_layout.setContentsMargins(0, 0, 0, 0)
+        transport_layout.setSpacing(2)
+        transport_layout.addWidget(self.first_frame_button)
+        transport_layout.addWidget(self.prev_frame_button)
+        transport_layout.addWidget(self.play_button)
+        transport_layout.addWidget(self.next_frame_button)
+        transport_layout.addWidget(self.last_frame_button)
+
+        info_strip = QWidget()
+        info_layout = QHBoxLayout(info_strip)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(12)
+        info_layout.addWidget(self.model_info_label, 1)
+        info_layout.addWidget(self.clip_info_label, 0)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+
+        # Row 0 / 1: playback transport, scrubbing and toggles.
+        controls_layout.addWidget(transport, 0, 0, 2, 1)
 
         controls_layout.addWidget(QLabel("Progress"), 0, 1)
         controls_layout.addWidget(self.progress_slider, 0, 2)
@@ -128,14 +192,21 @@ class MainWindow(QMainWindow):
 
         controls_layout.addWidget(QLabel("Intensity"), 1, 1)
         controls_layout.addWidget(self.intensity_slider, 1, 2)
-        controls_layout.addWidget(self.frame_label, 1, 3, 1, 4)
+        controls_layout.addWidget(self.loop_check, 1, 3)
+        controls_layout.addWidget(self.frame_label, 1, 4, 1, 3)
 
+        # Row 2: clip selection and sequence scrubbing.
         controls_layout.addWidget(QLabel("Clip"), 2, 0)
-        controls_layout.addWidget(self.clip_combo, 2, 1, 1, 2)
-        controls_layout.addWidget(QLabel("Sequence"), 2, 3)
-        controls_layout.addWidget(self.sequence_slider, 2, 4, 1, 3)
+        controls_layout.addWidget(self.clip_combo, 2, 1, 1, 3)
+        controls_layout.addWidget(QLabel("Sequence"), 2, 4)
+        controls_layout.addWidget(self.sequence_slider, 2, 5, 1, 2)
+
+        # Row 3 / 4: persistent readouts, separated from the controls.
+        controls_layout.addWidget(separator, 3, 0, 1, 7)
+        controls_layout.addWidget(info_strip, 4, 0, 1, 7)
 
         controls_layout.setColumnStretch(2, 1)
+        controls_layout.setColumnStretch(5, 1)
 
         layout.addWidget(self.viewport, 1)
         layout.addWidget(controls, 0)
@@ -161,13 +232,59 @@ class MainWindow(QMainWindow):
         self.skeletal_check.toggled.connect(self.skeletal_changed)
         self.driver_check.toggled.connect(self.driver_changed)
         self.fps_spin.valueChanged.connect(self.fps_changed)
+        self.first_frame_button.clicked.connect(self.goto_first_frame)
+        self.prev_frame_button.clicked.connect(self.step_frame_back)
+        self.next_frame_button.clicked.connect(self.step_frame_forward)
+        self.last_frame_button.clicked.connect(self.goto_last_frame)
 
         self.statusBar().showMessage("Source Model Viewer in Python")
 
+    def keyPressEvent(self, event):
+        # Key events that a child widget accepts (sliders, spin boxes,
+        # checkboxes, line edits) never reach here, so their native handling
+        # stays intact.
+        key = event.key()
+        if key == Qt.Key_Space and self.play_button.isEnabled():
+            self.toggle_playback()
+            event.accept()
+            return
+        if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Home, Qt.Key_End):
+            if key == Qt.Key_Left:
+                self.step_frame(-1)
+            elif key == Qt.Key_Right:
+                self.step_frame(1)
+            elif key == Qt.Key_Home:
+                self.set_frame_boundary(True)
+            else:
+                self.set_frame_boundary(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def showEvent(self, event):
         super().showEvent(event)
+        if not self._geometry_restored:
+            self._geometry_restored = True
+            settings = QSettings("SourceModelViewer", "Settings")
+            geometry = settings.value("window/geometry")
+            if geometry is not None:
+                self.restoreGeometry(geometry)
+                screen = QGuiApplication.primaryScreen()
+                if screen is not None:
+                    available = screen.availableGeometry()
+                    width = min(self.width(), available.width())
+                    height = min(self.height(), available.height())
+                    x = max(available.left(), min(self.x(), available.right() - width))
+                    y = max(available.top(), min(self.y(), available.bottom() - height))
+                    self.setGeometry(x, y, width, height)
         self.apply_settings()
         self.viewport.setFocus()
+
+    def closeEvent(self, event):
+        settings = QSettings("SourceModelViewer", "Settings")
+        settings.setValue("window/geometry", self.saveGeometry())
+        settings.sync()
+        super().closeEvent(event)
 
     def _create_actions(self):
         self.open_action = QAction("&Open...", self)
@@ -270,6 +387,12 @@ class MainWindow(QMainWindow):
         self.show_axes_action.setStatusTip("Toggle the red green blue axis lines")
         self.show_axes_action.triggered.connect(self.toggle_axes)
 
+        self.show_controls_action = QAction("Show Playback Controls", self)
+        self.show_controls_action.setCheckable(True)
+        self.show_controls_action.setChecked(True)
+        self.show_controls_action.setStatusTip("Show or hide the bottom playback controls")
+        self.show_controls_action.triggered.connect(self.toggle_show_controls)
+
         self.wireframe_action = QAction("Wireframe Overlay", self)
         self.wireframe_action.setCheckable(True)
         self.wireframe_action.setChecked(False)
@@ -322,6 +445,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.show_grid_action)
         view_menu.addAction(self.show_axes_action)
+        view_menu.addAction(self.show_controls_action)
         view_menu.addSeparator()
         view_menu.addAction(self.solid_view_action)
         view_menu.addAction(self.uv_checker_action)
@@ -438,6 +562,7 @@ class MainWindow(QMainWindow):
 
         clips = parsed.metadata.get("animation_clips") or []
         self._set_animation_clips(clips)
+        self._maybe_autoplay()
 
         msg = f"Loaded {len(parsed.triangles)} triangles from {file_path}"
         if auto_mat:
@@ -521,6 +646,7 @@ class MainWindow(QMainWindow):
 
             self.stop_playback()
             self.update_animation_ui()
+            self._maybe_autoplay()
 
             if parsed.has_animation:
                 self.statusBar().showMessage(
@@ -543,6 +669,7 @@ class MainWindow(QMainWindow):
 
             self.stop_playback()
             self.update_animation_ui()
+            self._maybe_autoplay()
 
             if self.viewport.frame_count() > 0:
                 self.statusBar().showMessage(
@@ -648,6 +775,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        self._maybe_autoplay()
         self._show_animation_warnings()
 
     def open_sequence(self):
@@ -687,6 +815,7 @@ class MainWindow(QMainWindow):
             if self.flex_info is not None:
                 self.apply_flex_info(self.flex_info, self.flex_info_override)
 
+            self._maybe_autoplay()
             self.statusBar().showMessage(
                 f"Loaded {len(animation_clips)} DMX clips from {file_path}"
             )
@@ -720,6 +849,7 @@ class MainWindow(QMainWindow):
 
         self.stop_playback()
         self.update_animation_ui()
+        self._maybe_autoplay()
 
         if self.viewport.has_rig():
             driver_name = self.viewport.driver_bone_name()
@@ -964,6 +1094,12 @@ class MainWindow(QMainWindow):
     def toggle_axes(self):
         self.viewport.set_show_axes(self.show_axes_action.isChecked())
 
+    def toggle_show_controls(self):
+        visible = self.show_controls_action.isChecked()
+        self.controls_frame.setVisible(visible)
+        settings = QSettings("SourceModelViewer", "Settings")
+        settings.setValue("window/show_controls", visible)
+
     def toggle_wireframe(self):
         self.viewport.set_wireframe(self.wireframe_action.isChecked())
 
@@ -1139,6 +1275,109 @@ class MainWindow(QMainWindow):
             and (self.skeletal_check.isChecked() or self.driver_check.isChecked())
         )
 
+    def _step_uses_sequence(self):
+        if self._sequence_playback_active():
+            return True
+        if self.viewport.frame_count() > 1:
+            return False
+        return self.viewport.has_skeletal_animation()
+
+    def _sync_sequence_slider(self, frame, count):
+        progress = frame / (count - 1) if count > 1 else 0.0
+        self.sequence_slider.blockSignals(True)
+        self.sequence_slider.setValue(int(round(progress * 1000)))
+        self.sequence_slider.blockSignals(False)
+
+    def step_frame(self, delta):
+        self.stop_playback()
+        if self._step_uses_sequence():
+            count = self.viewport.skeletal_frame_count()
+            if count <= 0:
+                return
+            current = self.viewport.skeletal_current_frame()
+            new_frame = max(0.0, min(float(current) + delta, count - 1))
+            self.viewport.set_skeletal_frame(new_frame)
+            self._sync_sequence_slider(new_frame, count)
+        else:
+            count = self.viewport.frame_count()
+            if count <= 1:
+                return
+            step = max(1, int(round(1000.0 / float(count - 1))))
+            value = self.progress_slider.value()
+            self.progress_slider.setValue(max(0, min(1000, value + delta * step)))
+        self.update_frame_label()
+
+    def set_frame_boundary(self, first):
+        self.stop_playback()
+        if self._step_uses_sequence():
+            count = self.viewport.skeletal_frame_count()
+            if count <= 0:
+                return
+            new_frame = 0.0 if first else float(count - 1)
+            self.viewport.set_skeletal_frame(new_frame)
+            self._sync_sequence_slider(new_frame, count)
+        else:
+            if self.viewport.frame_count() <= 1:
+                return
+            self.progress_slider.setValue(0 if first else 1000)
+        self.update_frame_label()
+
+    def step_frame_back(self):
+        self.step_frame(-1)
+
+    def step_frame_forward(self):
+        self.step_frame(1)
+
+    def goto_first_frame(self):
+        self.set_frame_boundary(True)
+
+    def goto_last_frame(self):
+        self.set_frame_boundary(False)
+
+    def update_clip_info(self):
+        index = self.clip_combo.currentIndex()
+        if index < 0 or index >= len(self._clip_models):
+            self.clip_info_label.setText("")
+            return
+        _, clip_model = self._clip_models[index]
+        metadata = getattr(clip_model, "metadata", {}) or {}
+        frames = len(clip_model.frames) if clip_model.frames else 0
+        parts = [f"{frames}f"]
+        fps = metadata.get("frame_rate")
+        try:
+            if fps is not None:
+                parts.append(f"{float(fps):g}fps")
+        except (TypeError, ValueError):
+            pass
+        duration = metadata.get("duration")
+        try:
+            if duration is not None:
+                parts.append(f"{float(duration):.2f}s")
+        except (TypeError, ValueError):
+            pass
+        if "looping" in metadata:
+            parts.append("loop" if metadata.get("looping") else "once")
+        self.clip_info_label.setText("  ".join(parts))
+
+    def update_model_info(self):
+        model = self.viewport.renderer.model
+        if model is None:
+            self.model_info_label.setText("")
+            return
+        triangles = len(getattr(model, "triangles", []) or [])
+        bones = len(getattr(model, "bones", []) or [])
+        materials = len(getattr(model, "materials", []) or [])
+        clips = len(self._clip_models)
+        self.model_info_label.setText(
+            f"{triangles} triangles  |  {bones} bones  |  "
+            f"{materials} materials  |  {clips} clips"
+        )
+
+    def _maybe_autoplay(self):
+        settings = QSettings("SourceModelViewer", "Settings")
+        if settings.value("defaults/autoplay", False, type=bool) and self.play_button.isEnabled():
+            self.start_playback()
+
     def advance_frame(self):
         if self._sequence_playback_active():
             count = self.viewport.skeletal_frame_count()
@@ -1148,14 +1387,19 @@ class MainWindow(QMainWindow):
             current = self.viewport.skeletal_current_frame()
             new_frame = current + 1.0
             if new_frame >= count:
+                if not self.loop_check.isChecked():
+                    self.viewport.set_skeletal_frame(count - 1)
+                    self._sync_sequence_slider(count - 1, count)
+                    if self.driver_check.isChecked():
+                        self.sync_sliders_from_renderer()
+                    self.update_frame_label()
+                    self.stop_playback()
+                    return
                 new_frame = 0.0
             self.viewport.set_skeletal_frame(new_frame)
 
             # Update sequence slider
-            progress = new_frame / (count - 1) if count > 1 else 0.0
-            self.sequence_slider.blockSignals(True)
-            self.sequence_slider.setValue(int(progress * 1000))
-            self.sequence_slider.blockSignals(False)
+            self._sync_sequence_slider(new_frame, count)
 
             if self.driver_check.isChecked():
                 self.sync_sliders_from_renderer()
@@ -1172,6 +1416,10 @@ class MainWindow(QMainWindow):
         value = self.progress_slider.value()
 
         if value + step >= 1000:
+            if not self.loop_check.isChecked():
+                self.progress_slider.setValue(1000)
+                self.stop_playback()
+                return
             self.progress_slider.setValue(0)
         else:
             self.progress_slider.setValue(value + step)
@@ -1287,6 +1535,15 @@ class MainWindow(QMainWindow):
 
         self.play_button.setEnabled(play_enabled)
         self.fps_spin.setEnabled(play_enabled)
+        step_enabled = (vta_count > 1) or (has_sequence and sequence_count > 1)
+        for step_button in (
+            self.first_frame_button,
+            self.prev_frame_button,
+            self.next_frame_button,
+            self.last_frame_button,
+        ):
+            step_button.setEnabled(step_enabled)
+        self.loop_check.setEnabled(play_enabled)
 
         # Update clip combo and sequence slider
         clips = self.viewport.clip_names()
@@ -1307,6 +1564,9 @@ class MainWindow(QMainWindow):
             self.frame_label.setText("No reference mesh")
         else:
             self.frame_label.setText("No animation")
+
+        self.update_clip_info()
+        self.update_model_info()
 
     def update_frame_label(self):
         vta_count = self.viewport.frame_count()
@@ -1375,6 +1635,7 @@ class MainWindow(QMainWindow):
             self.sequence_slider.setValue(0)
             self.stop_playback()
             self.update_animation_ui()
+            self._maybe_autoplay()
 
     def sequence_progress_changed(self, value):
         progress = value / 1000.0
@@ -1448,6 +1709,25 @@ class MainWindow(QMainWindow):
         show_skeleton = settings.value("model/show_skeleton", False, type=bool)
         self.skeleton_action.setChecked(show_skeleton)
         self.viewport.set_show_skeleton(show_skeleton)
+
+        # Playback defaults
+        loop_default = settings.value("defaults/loop", True, type=bool)
+        self.loop_check.setChecked(loop_default)
+
+        shape_mode_default = settings.value("defaults/shape_key_mode", True, type=bool)
+        self.shape_mode_check.blockSignals(True)
+        self.shape_mode_check.setChecked(shape_mode_default)
+        self.shape_mode_check.blockSignals(False)
+        self.viewport.set_animation_mode("shape" if shape_mode_default else "sequence")
+
+        # Window and appearance
+        show_controls = settings.value("window/show_controls", True, type=bool)
+        self.show_controls_action.setChecked(show_controls)
+        self.controls_frame.setVisible(show_controls)
+
+        # Texture filtering was saved by the dialog but never applied before
+        filter_mode = settings.value("materials/filter_mode", 0, type=int)
+        self.viewport.renderer.set_texture_filter_mode(filter_mode)
 
         self.viewport.update()
 

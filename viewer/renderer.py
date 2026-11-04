@@ -22,6 +22,9 @@ from OpenGL.GL import (
     GL_FILL,
     GL_LINEAR,
     GL_LINEAR_MIPMAP_LINEAR,
+    GL_LINEAR_MIPMAP_NEAREST,
+    GL_NEAREST,
+    GL_NEAREST_MIPMAP_NEAREST,
     GL_LINES,
     GL_POINTS,
     GL_MODELVIEW,
@@ -316,6 +319,7 @@ class Renderer:
         self.material_props = {}
         self.material_maps = {}
         self.material_dirs = []
+        self.texture_filter_mode = 0
         self.model_material_dirs = []
         self._material_batches = []
         self._gl_extensions = None
@@ -476,6 +480,32 @@ class Renderer:
         if dir_path not in self.material_dirs:
             self.material_dirs.append(dir_path)
             self._unload_textures()
+
+    def set_texture_filter_mode(self, mode):
+        """Set the texture filter mode (0 trilinear, 1 bilinear, 2 nearest).
+
+        Uploaded textures keep their filter parameters, so a change drops the
+        cache and lets the next draw re-upload them with the new mode.
+        """
+        try:
+            mode = int(mode)
+        except (TypeError, ValueError):
+            mode = 0
+        mode = max(0, min(2, mode))
+        if mode == self.texture_filter_mode:
+            return
+        self.texture_filter_mode = mode
+        if self.texture_cache or self.material_maps or getattr(self, "_checker_tex", None):
+            self._unload_textures()
+
+    def _texture_filters(self, has_mipmaps=True):
+        """(min filter, mag filter) for the current texture filter mode."""
+        mode = self.texture_filter_mode
+        if mode == 1:
+            return (GL_LINEAR_MIPMAP_NEAREST if has_mipmaps else GL_LINEAR, GL_LINEAR)
+        if mode == 2:
+            return (GL_NEAREST_MIPMAP_NEAREST if has_mipmaps else GL_NEAREST, GL_NEAREST)
+        return (GL_LINEAR_MIPMAP_LINEAR if has_mipmaps else GL_LINEAR, GL_LINEAR)
 
     def _unload_textures(self):
         for tex_id in self.texture_cache.values():
@@ -692,8 +722,9 @@ class Renderer:
         tex_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, tex_id)
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        min_filter, mag_filter = self._texture_filters(True)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t)
 
@@ -861,12 +892,9 @@ class Renderer:
         try:
             tex_id = glGenTextures(1)
             glBindTexture(GL_TEXTURE_2D, tex_id)
-            glTexParameteri(
-                GL_TEXTURE_2D,
-                GL_TEXTURE_MIN_FILTER,
-                GL_LINEAR_MIPMAP_LINEAR if has_mipmaps else GL_LINEAR,
-            )
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            min_filter, mag_filter = self._texture_filters(has_mipmaps)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag_filter)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, len(mips) - 1)

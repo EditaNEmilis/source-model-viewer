@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
@@ -17,65 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
-SETTINGS_STYLE = """
-    QDialog {
-        background-color: #17181d;
-        color: #d6d8de;
-    }
-    QTabWidget::pane {
-        border: 1px solid #2a2c34;
-        background-color: #17181d;
-    }
-    QTabBar::tab {
-        background-color: #20222a;
-        color: #9da3b4;
-        padding: 8px 16px;
-        margin-right: 2px;
-        border-top-left-radius: 4px;
-        border-top-right-radius: 4px;
-    }
-    QTabBar::tab:selected {
-        background-color: #2a2c34;
-        color: #f2f3f7;
-    }
-    QGroupBox {
-        font-weight: bold;
-        border: 1px solid #2a2c34;
-        border-radius: 6px;
-        margin-top: 10px;
-        padding-top: 10px;
-        color: #a9b1e8;
-    }
-    QGroupBox::title {
-        subcontrol-origin: margin;
-        left: 10px;
-        padding: 0 4px;
-    }
-    QLabel {
-        color: #d6d8de;
-    }
-    QLineEdit, QSpinBox, QComboBox {
-        background-color: #23252d;
-        color: #d6d8de;
-        border: 1px solid #3a3d47;
-        border-radius: 4px;
-        padding: 4px 8px;
-    }
-    QPushButton {
-        background-color: #2a2c34;
-        color: #d6d8de;
-        border: 1px solid #3a3d47;
-        border-radius: 4px;
-        padding: 6px 16px;
-    }
-    QPushButton:hover {
-        background-color: #343742;
-    }
-    QCheckBox {
-        color: #d6d8de;
-    }
-"""
+from viewer.ui_style import dialog_stylesheet
 
 
 class SettingsDialog(QDialog):
@@ -83,9 +26,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(520, 420)
-        self.setStyleSheet(SETTINGS_STYLE)
-
         self.settings = QSettings("SourceModelViewer", "Settings")
+        theme = self.settings.value("window/theme", 0, type=int)
+        self.setStyleSheet(dialog_stylesheet(theme))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -193,7 +136,29 @@ class SettingsDialog(QDialog):
         )
         anim_form.addRow(self.proximity_default_check)
 
+        playback_group = QGroupBox("Playback Defaults")
+        playback_form = QFormLayout(playback_group)
+
+        self.autoplay_check = QCheckBox("Autoplay when a model or clip loads")
+        self.autoplay_check.setChecked(
+            self.settings.value("defaults/autoplay", False, type=bool)
+        )
+        playback_form.addRow(self.autoplay_check)
+
+        self.loop_default_check = QCheckBox("Loop playback by default")
+        self.loop_default_check.setChecked(
+            self.settings.value("defaults/loop", True, type=bool)
+        )
+        playback_form.addRow(self.loop_default_check)
+
+        self.shape_mode_default_check = QCheckBox("Start in Shape Key Mode by default")
+        self.shape_mode_default_check.setChecked(
+            self.settings.value("defaults/shape_key_mode", True, type=bool)
+        )
+        playback_form.addRow(self.shape_mode_default_check)
+
         anim_layout.addWidget(anim_group)
+        anim_layout.addWidget(playback_group)
         anim_layout.addStretch()
         tabs.addTab(anim_tab, "Defaults")
 
@@ -228,6 +193,33 @@ class SettingsDialog(QDialog):
         model_layout.addWidget(model_group)
         model_layout.addStretch()
         tabs.addTab(model_tab, "Model")
+
+        # Tab 5: Window and appearance
+        window_tab = QWidget()
+        window_layout = QVBoxLayout(window_tab)
+
+        window_group = QGroupBox("Window and Appearance")
+        window_form = QFormLayout(window_group)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Dark", "Light"])
+        theme_index = self.settings.value("window/theme", 0, type=int)
+        self.theme_combo.setCurrentIndex(1 if theme_index == 1 else 0)
+        window_form.addRow("Dialog Theme:", self.theme_combo)
+
+        self.show_controls_check = QCheckBox("Show playback controls")
+        self.show_controls_check.setChecked(
+            self.settings.value("window/show_controls", True, type=bool)
+        )
+        window_form.addRow(self.show_controls_check)
+
+        note = QLabel("Window size and position are saved on exit and restored on startup.")
+        note.setWordWrap(True)
+        window_form.addRow(note)
+
+        window_layout.addWidget(window_group)
+        window_layout.addStretch()
+        tabs.addTab(window_tab, "Window")
 
         layout.addWidget(tabs, 1)
 
@@ -276,6 +268,9 @@ class SettingsDialog(QDialog):
         self.settings.setValue("defaults/fps", self.default_fps_spin.value())
         self.settings.setValue("defaults/culling", self.culling_default_check.isChecked())
         self.settings.setValue("defaults/proximity_skin", self.proximity_default_check.isChecked())
+        self.settings.setValue("defaults/autoplay", self.autoplay_check.isChecked())
+        self.settings.setValue("defaults/loop", self.loop_default_check.isChecked())
+        self.settings.setValue("defaults/shape_key_mode", self.shape_mode_default_check.isChecked())
 
         view_modes = ["textured", "solid", "uv_checker"]
         view_index = max(0, min(self.view_mode_combo.currentIndex(), 2))
@@ -283,5 +278,9 @@ class SettingsDialog(QDialog):
         self.settings.setValue("model/wireframe", self.wireframe_check.isChecked())
         self.settings.setValue("model/show_skeleton", self.skeleton_check.isChecked())
 
+        self.settings.setValue("window/theme", self.theme_combo.currentIndex())
+        self.settings.setValue("window/show_controls", self.show_controls_check.isChecked())
+
         self.settings.sync()
+        self.setStyleSheet(dialog_stylesheet(self.theme_combo.currentIndex()))
         self.accept()

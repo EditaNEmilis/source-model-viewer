@@ -1,32 +1,12 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import QDialog, QPushButton, QTextBrowser, QVBoxLayout
 
 from viewer import __version__
+from viewer.ui_style import DARK_THEME, LIGHT_THEME, dialog_stylesheet
 
 
-DIALOG_STYLE = """
-    QDialog {
-        background-color: #17181d;
-    }
-    QTextBrowser {
-        background-color: #17181d;
-        color: #d6d8de;
-        border: none;
-    }
-    QPushButton {
-        background-color: #2a2c34;
-        color: #d6d8de;
-        border: 1px solid #3a3d47;
-        border-radius: 4px;
-        padding: 6px 20px;
-    }
-    QPushButton:hover {
-        background-color: #343742;
-    }
-    QPushButton:pressed {
-        background-color: #22242b;
-    }
-"""
+# Backward-compatible alias for the dark dialog stylesheet.
+DIALOG_STYLE = dialog_stylesheet(DARK_THEME)
 
 _PAGE_STYLE = (
     "body { font-family: 'Segoe UI', 'Noto Sans', sans-serif; "
@@ -43,19 +23,42 @@ _PAGE_STYLE = (
     "font-size: 12px; white-space: nowrap; }"
 )
 
+_PAGE_STYLE_LIGHT = (
+    "body { font-family: 'Segoe UI', 'Noto Sans', sans-serif; "
+    "font-size: 13px; color: #20222a; line-height: 150%; }"
+    "h1 { font-size: 20px; color: #10121a; margin: 0 0 4px 0; }"
+    "h2 { font-size: 12px; color: #3f4ea8; margin: 18px 0 6px 0; "
+    "text-transform: uppercase; letter-spacing: 1.5px; }"
+    "p { margin: 4px 0 10px 0; }"
+    "code { font-family: 'Cascadia Mono', 'Consolas', monospace; "
+    "font-size: 12px; color: #1a5fb4; background: #e2e5ec; padding: 1px 5px; }"
+    "table { border-collapse: collapse; margin: 6px 0 12px 0; }"
+    "td { padding: 3px 16px 3px 0; vertical-align: top; }"
+    "td.k { color: #8a5a00; font-family: 'Cascadia Mono', 'Consolas', monospace; "
+    "font-size: 12px; white-space: nowrap; }"
+)
 
-def _page(title, body):
+
+def _page(title, body, theme=DARK_THEME):
+    style = _PAGE_STYLE_LIGHT if theme == LIGHT_THEME else _PAGE_STYLE
     return (
-        "<html><head><style>" + _PAGE_STYLE + "</style></head>"
+        "<html><head><style>" + style + "</style></head>"
         "<body><h1>" + title + "</h1>" + body + "</body></html>"
     )
 
 
 def show_help_dialog(parent, title, html, width=560, height=540):
+    theme = QSettings("SourceModelViewer", "Settings").value(
+        "window/theme", DARK_THEME, type=int)
+    if theme == LIGHT_THEME:
+        # MainWindow builds the html with the default dark style; swap the
+        # embedded page style so the text stays legible on a light dialog.
+        html = html.replace(_PAGE_STYLE, _PAGE_STYLE_LIGHT)
+
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
     dialog.resize(width, height)
-    dialog.setStyleSheet(DIALOG_STYLE)
+    dialog.setStyleSheet(dialog_stylesheet(theme))
 
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(16, 16, 16, 14)
@@ -75,7 +78,7 @@ def show_help_dialog(parent, title, html, width=560, height=540):
     dialog.exec()
 
 
-def controls_html():
+def controls_html(theme=DARK_THEME):
     rows = [
         ("Left drag", "Rotate camera"),
         ("Middle drag", "Pan camera"),
@@ -91,6 +94,16 @@ def controls_html():
         ("Ctrl + M", "Reset model position"),
         ("Ctrl + Shift + R", "Reset camera and model"),
         ("F1", "Open this dialog"),
+        ("Space", "Play / Pause"),
+        ("Left / Right", "Step one frame"),
+        ("Home / End", "Jump to first / last frame"),
+        ("Step buttons (\"|&lt;\", \"&lt;\", \"&gt;\", \"&gt;|\")",
+         "First / previous / next / last frame"),
+        ("Loop checkbox", "Wrap playback at the end (on by default)"),
+        ("Clip info label",
+         "Frames / fps / duration / looping of the selected clip"),
+        ("Model info label",
+         "Triangles, bones, materials and clip count of the loaded model"),
         ("Clip dropdown", "Switch between animation clips (DMX, SMD, MDL, GoldSrc, beta probe)"),
         ("Sequence slider", "Scrub through skeletal animation (SMD, DMX, MDL, GoldSrc, beta clips)"),
         ("Driver checkbox", "Let a driver bone control Intensity and Progress"),
@@ -106,10 +119,18 @@ def controls_html():
     body = (
         "<h2>Mouse and keyboard</h2>" + table +
         "<h2>Playback bar</h2>"
-        "<p><code>Play</code> starts or pauses the active animation. "
+        "<p><code>Play</code> starts or pauses the active animation "
+        "(<code>Space</code>). "
         "<code>Progress</code> scrubs frames or shape keys. "
         "<code>Intensity</code> blends from the basis shape toward the selected shape. "
         "<code>FPS</code> sets playback speed.</p>"
+        "<p>The step buttons (<code>|&lt;</code>, <code>&lt;</code>, <code>&gt;</code>, "
+        "<code>&gt;|</code>) jump to the first, previous, next or last frame; "
+        "<code>Left</code> / <code>Right</code> step one frame and "
+        "<code>Home</code> / <code>End</code> jump to the first / last frame. "
+        "<code>Loop</code> wraps playback at the end (on by default), and the "
+        "clip info label reports the selected clip's frames, fps, duration and "
+        "looping flag.</p>"
         "<p><code>Shape Key Mode</code> shows each target as an independent shape. "
         "Turn it off to blend targets as a sequence. "
         "<code>Skel</code> applies skeletal deformation. "
@@ -128,10 +149,10 @@ def controls_html():
         "or configure default search directories in <code>File &gt; Settings...</code> (Ctrl+,).</p>"
     )
 
-    return _page("Viewer Controls", body)
+    return _page("Viewer Controls", body, theme)
 
 
-def animation_html():
+def animation_html(theme=DARK_THEME):
     body = (
         "<h2>Shape keys</h2>"
         "<p>Each target is one static shape. In <code>Shape Key Mode</code> the viewer "
@@ -164,18 +185,22 @@ def animation_html():
         "recenter.</p>"
         "<h2>GoldSrc retail notes</h2>"
         "<p>Version 10 local sequences decode from compressed values with the "
-        "bone table base and scale. Only the first blend is used in 0.7.0. "
-        "Missing tracks hold the bind pose.</p>"
+        "bone table base and scale. Every declared blend is exposed as a separate "
+        "selectable clip. Missing tracks hold the bind pose.</p>"
+        "<h2>HL2 beta notes</h2>"
+        "<p>Beta v37 clips decode per-bone rotation streams into playable clips. "
+        "Some single-frame poses are intentionally static. Root and position "
+        "motion is not decoded, so clips play in place (a known limitation).</p>"
         "<h2>Driver bone</h2>"
         "<p>A bone such as <code>vertexAnimDriver</code> can drive a vertex animation. "
         "Its X position sets intensity from 0 to 1, and its Y position sets progress "
         "from 0 to 1.</p>"
     )
 
-    return _page("Animation Guide", body)
+    return _page("Animation Guide", body, theme)
 
 
-def formats_html():
+def formats_html(theme=DARK_THEME):
     body = (
         "<h2>MDL / VVD / VTX</h2>"
         "<p>Compiled Source engine models. The viewer parses the main <code>.mdl</code> header, "
@@ -197,13 +222,16 @@ def formats_html():
         "<h2>HL2 beta MDL (v37)</h2>"
         "<p>2001-2003 era builds: 64-byte vertices, 196-byte bones, 68-byte meshes, "
         "and version 6 VTX strips. Geometry loads, including multi-bodypart "
-        "models. The 2002 sequence layout is still being worked out, so clips "
-        "stay unlisted instead of guessed.</p>"
+        "models. Sequences decode into playable per-bone rotation clips with fps "
+        "and looping flags; root and position motion is not decoded, so clips play "
+        "in place (a known limitation).</p>"
         "<h2>Source 2 VMDL_C</h2>"
         "<p>Compiled Source 2 models: LZ4 + KV3 draw calls with VBIB-layout vertex/index "
-        "buffers, positions, normals, UVs, and material names. Skeleton and blend "
-        "weights are still open (single dummy root bone), truncated trailing scene "
-        "data loads the complete draw calls with a status-bar note.</p>"
+        "buffers, positions, normals, UVs, and material names. The m_skeleton bone "
+        "hierarchy, inverse bind poses and per-vertex blend indices/weights drive "
+        "bind-pose skinning; MRPH morph sets become shape keys, and vmat_c / vtex_c "
+        "materials resolve base color textures. Truncated trailing scene data loads "
+        "the complete draw calls with a status-bar note.</p>"
         "<h2>SMD</h2>"
         "<p>ASCII StudioModel Data. Reference files contain nodes, skeleton, and "
         "triangles. Animation files contain nodes and skeleton only.</p>"
@@ -220,16 +248,17 @@ def formats_html():
         "<code>$translucent</code>, and <code>$alphatest</code>.</p>"
     )
 
-    return _page("Supported Formats", body)
+    return _page("Supported Formats", body, theme)
 
 
-def about_html():
+def about_html(theme=DARK_THEME):
     body = (
         "<h2>Version " + __version__ + "</h2>"
         "<h2>What it reads</h2>"
         "<p>Compiled Source models (.mdl, .vvd, .vtx) with skeletal clips, GoldSrc "
-        "Half-Life models (.mdl), HL1 alpha (v6) and HL2 beta (v37) models, "
-        "Source 2 models (.vmdl_c mesh import), "
+        "Half-Life models (.mdl), HL1 alpha (v6) and HL2 beta (v37) models with "
+        "playable clips, Source 2 models (.vmdl_c) with m_skeleton skeletons, "
+        "morph sets / shape keys and vmat_c / vtex_c materials, "
         "SMD reference meshes, SMD skeletal sequences, "
         "VTA vertex animation, DMX models in KeyValues2 and binary, DMX shape keys, and "
         "VTF/VMT materials.</p>"
@@ -237,4 +266,4 @@ def about_html():
         "<p>PySide6, PyOpenGL, and numpy.</p>"
     )
 
-    return _page("Source Model Viewer", body)
+    return _page("Source Model Viewer", body, theme)

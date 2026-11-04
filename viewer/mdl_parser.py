@@ -600,6 +600,84 @@ def _beta_rle_track(data: bytes, pos: int, numframes: int):
     return out if len(out) >= numframes else None
 
 
+def _beta_perframe_track(data: bytes, pos: int, numframes: int):
+    """Conservative detector for the beta "per-frame" stream variant.
+
+    Some v37 clips store a rotation channel as a run of 4-byte records
+
+        (valid = 1, total >= numframes, one int16 value)
+
+    one value per frame (the whole clip is a shared pool of these records
+    and each channel reads a sliding window into it).  Under the normal
+    RLE rules the *first* such record has total == numframes, so
+    :func:`_beta_rle_track` holds that single value for the entire clip and
+    the curve freezes.  This helper recognises the layout and returns one
+    int16 per record, i.e. numframes values.
+
+    It is deliberately conservative and is only ever tried on clips that
+    are otherwise static (see :func:`_beta_animation_clips`).  Recognition
+    requires a leading record with valid == 1 and total >= numframes, plus
+    at least three records in the window carrying that signature; when
+    that evidence is missing the helper returns None so the caller falls
+    back to the normal RLE decoder (never hijack a real RLE stream).  Once
+    a stream IS recognised, a malformed / out-of-range record marks the end
+    of its trusted per-frame run: we HOLD the last real sample for the
+    remaining frames instead of decoding unrelated bytes that follow.  The
+    shared sliding-window pools on these clips are shorter than numframes
+    for many channels (e.g. Antlion ragdoll), so this hold is what lets a
+    frozen curve still move without ever applying a wrong value.
+    Returns a list of numframes ints, or None.
+    """
+    n = len(data)
+    if numframes <= 1 or pos + 4 > n:
+        return None
+    # Signature of the first record.
+    if data[pos] != 1 or data[pos + 1] < numframes:
+        return None
+    out = []
+    last = 0
+    confirmed = 0
+    for k in range(numframes):
+        p = pos + k * 4
+        if p + 4 <= n and data[p] == 1 and data[p + 1] >= numframes:
+            (val,) = struct.unpack_from("<h", data, p + 2)
+            last = val
+            confirmed += 1
+        else:
+            # End of the recognised per-frame run: hold the last real
+            # value instead of applying a chunk that belongs elsewhere.
+            val = last
+        out.append(val)
+    if confirmed < 3:
+        return None
+    return out
+
+
+def _beta_alt_track(data: bytes, pos: int, numframes: int):
+    """Channel decoder used for the gated "recover static clip" pass.
+
+    Standard RLE stays the default: try the per-frame detector first and,
+    whenever it declines a stream (returns None), decode that channel with
+    :func:`_beta_rle_track` unchanged.
+    """
+    perframe = _beta_perframe_track(data, pos, numframes)
+    if perframe is not None:
+        return perframe
+    return _beta_rle_track(data, pos, numframes)
+
+
+def _beta_anim_varies(animated) -> bool:
+    """True when any decoded curve actually changes over the clip."""
+    for chans in animated.values():
+        for curve in chans:
+            if curve is None:
+                continue
+            if any(abs(curve[t] - curve[0]) > 1e-4
+                   for t in range(1, len(curve))):
+                return True
+    return False
+
+
 def _beta_cstr(data: bytes, n: int, off: int) -> str:
     if off < 0 or off >= n:
         return ""
@@ -1020,12 +1098,18 @@ def _beta_collect_entries(data: bytes, n: int, seq_blocks, block_for, i: int, mo
     return raw_entries, block_addrs
 
 
-def _beta_attribute_entries(data: bytes, raw_entries, bind_pos, numbones, bnames):
+def _beta_attribute_entries(data: bytes, raw_entries, bind_pos, numbones, bnames,
+                            numframes=1, beta_len=None, diag=None):
     """Assign each raw entry a bone. Pass 1 matches entries carrying
     their bone bind position (preferring previous bone + 1 on repeats);
     pass 2 fills zero-base entries positionally from the run anchor;
     pass 2b stacks leftover chain heads below their follower; the
     compact layout assigns full-body zero blocks by address slot.
+
+    ``numframes`` / ``beta_len`` gate the short-run positional fallback
+    (ROOT CAUSE B), so genuine single-frame poses and clips without a
+    matched beta_len are never attributed speculatively.  ``diag`` is an
+    optional dict used to report which attribution path was taken.
     Returns (entries, taken) with entries as (bone, addr, o1, o2, o3)."""
     taken = set()
     block_min = min((ent["addr"] for ent in raw_entries), default=None)
@@ -1148,13 +1232,48 @@ def _beta_attribute_entries(data: bytes, raw_entries, bind_pos, numbones, bnames
                 for ent in raw_entries
                 if ent["bone"] is not None
             ]
+        elif (block_min is not None and core
+              and all(((ent["addr"] - block_min) % 32 == 0)
+                      for ent in core)
+              and all(_beta_is_zero_base(*ent["base"]) for ent in core)
+              and numframes > 1
+              and beta_len is not None
+              and beta_len == numframes):
+            # ROOT CAUSE B: a short (< 21 entry) run whose entries are all
+            # zero-base and 32-byte aligned.  There is no bind position to
+            # match and no run anchor, so the only evidence available is
+            # the entry's slot in the block.  This is BEST-EFFORT positional
+            # attribution: (addr - block_min) // 32 becomes the bone index,
+            # clamped to range(numbones), never overriding an already-taken
+            # bone.  It is gated on numframes > 1 and a beta_len that
+            # matches the clip so genuine one-frame poses stay static.
+            for ent in core:
+                bi = (ent["addr"] - block_min) // 32
+                if 0 <= bi < numbones and bi not in taken:
+                    taken.add(bi)
+                    ent["bone"] = bi
+            entries = [
+                (ent["bone"], ent["addr"], *ent["offs"])
+                for ent in raw_entries
+                if ent["bone"] is not None
+            ]
+            if diag is not None:
+                diag["bone_attribution"] = "positional_short"
     return entries, taken
 
 
 def _beta_decode_motion(data: bytes, raw_entries, entries, numframes,
-                        bind_euler, rot_scale, root_idx, zfix_bones, taken):
+                        bind_euler, rot_scale, root_idx, zfix_bones, taken,
+                        track=None):
     """Decode RLE rotation channels to {bone: [x|None, y|None, z|None]},
-    with branch-cut unwrapping. Mutates taken (root claim)."""
+    with branch-cut unwrapping. Mutates taken (root claim).
+
+    ``track`` selects the per-channel stream decoder; the default is the
+    standard :func:`_beta_rle_track`.  :func:`_beta_animation_clips` passes
+    :func:`_beta_alt_track` for the gated "recover static clip" pass.
+    """
+    if track is None:
+        track = _beta_rle_track
     animated = {}
     if root_idx is not None and root_idx not in taken:
         for ent in raw_entries:
@@ -1168,7 +1287,7 @@ def _beta_decode_motion(data: bytes, raw_entries, entries, numframes,
                 rel = ent["offs"][ch]
                 if rel == 0:
                     continue
-                raw = _beta_rle_track(data, ent["addr"] + rel, numframes)
+                raw = track(data, ent["addr"] + rel, numframes)
                 if raw is None:
                     continue
                 base = bind_euler[root_idx][ch]
@@ -1191,7 +1310,7 @@ def _beta_decode_motion(data: bytes, raw_entries, entries, numframes,
             if rel == 0:
                 chans.append(None)
                 continue
-            raw = _beta_rle_track(data, eaddr + rel, numframes)
+            raw = track(data, eaddr + rel, numframes)
             if raw is None:
                 ok = False
                 break
@@ -1471,13 +1590,52 @@ def _beta_animation_clips(mdl_path, data, bones, base_transforms):
         if not 0 < numframes <= 2048 or not 0.0 < float(fps) <= 240.0:
             continue
         fps = float(fps)
+        beta_len = (block_lens.get(block_for.get(i))
+                    if seq_blocks is not None else None)
         raw_entries, block_addrs = _beta_collect_entries(
             data, n, seq_blocks, block_for, i, motion)
+        diag = {}
+        # ROOT CAUSE B: short aligned zero-base runs get best-effort
+        # positional bone slots, gated on numframes > 1 and a matched
+        # beta_len so genuine single-frame poses stay static.
         entries, taken = _beta_attribute_entries(
-            data, raw_entries, bind_pos, numbones, bnames)
+            data, raw_entries, bind_pos, numbones, bnames,
+            numframes=numframes, beta_len=beta_len, diag=diag)
+        # Standard decode first.  Working clips animate here and are never
+        # touched by the recovery pass below, so their frame counts and
+        # moving-bone counts stay identical.
         animated = _beta_decode_motion(
             data, raw_entries, entries, numframes,
-            bind_euler, rot_scale, root_idx, zfix_bones, taken)
+            bind_euler, rot_scale, root_idx, zfix_bones, set(taken))
+        alt_used = False
+        # ROOT CAUSE A: a clip whose standard decode is completely static
+        # is very likely stored in the "one int16 per frame" stream variant
+        # that the RLE decoder freezes.  Retry those channels with the
+        # alternate decoder.
+        #
+        # Gating (regression safety is paramount):
+        #   * "currently static" is the key guard.  Working clips already
+        #     animate in the standard pass, so they are NEVER re-decoded;
+        #     their frame/moving-bone counts stay bit-for-bit identical.
+        #   * numframes > 1 keeps genuine single-frame poses static.
+        #   * A matched beta_len (beta_len == numframes, which holds for
+        #     every paired block by construction) is trusted when present;
+        #     for clips with no paired block we still allow the read-only
+        #     decode try, because the per-frame detector is conservative
+        #     and the result is accepted ONLY if it yields real motion.
+        #     The matched-beta_len requirement is enforced strictly on the
+        #     positional-attribution path above, where blind bone slots
+        #     genuinely need a trusted block.
+        trusted_len = (beta_len is None or beta_len == numframes)
+        if (numframes > 1 and trusted_len
+                and not _beta_anim_varies(animated)):
+            alt = _beta_decode_motion(
+                data, raw_entries, entries, numframes,
+                bind_euler, rot_scale, root_idx, zfix_bones, set(taken),
+                track=_beta_alt_track)
+            if alt and _beta_anim_varies(alt):
+                animated = alt
+                alt_used = True
         frames = _beta_build_frames(
             bind_pos, bind_euler, numbones, animated, numframes, fps)
         model = SmdModel(version=37, bones=bones, frames=frames)
@@ -1490,8 +1648,9 @@ def _beta_animation_clips(mdl_path, data, bones, base_transforms):
                            if block_addrs is not None else None),
             "beta_source": ("block" if block_addrs is not None
                             else ("window" if raw_entries else "static")),
-            "beta_len": block_lens.get(block_for.get(i))
-                        if seq_blocks is not None else None,
+            "beta_len": beta_len,
+            "beta_stream_format": "perframe" if alt_used else "rle",
+            "beta_bone_attribution": diag.get("bone_attribution", "bind"),
         })
         clips.append((name, model))
     return clips, True

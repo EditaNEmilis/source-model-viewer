@@ -2,6 +2,26 @@
 
 Changelog of each versions.
 
+## [0.9.0] | Controls and UIs, other works
+
+### Added
+- Playback bar frame step buttons (`|<`, `<`, `>`, `>|`) and a Loop toggle (on by default).
+- Keyboard shortcuts: `Space` to play/pause, `Left` / `Right` to step one frame, `Home` / `End` to jump to the first / last frame.
+- Clip info readout showing the selected clip's frames, fps, duration and looping flag.
+- Settings Playback Defaults: autoplay on load, default loop state and default shape key mode.
+- Settings Window tab: remember window geometry, show/hide playback controls, and a dark/light dialog theme.
+- Live texture filtering: Trilinear / Bilinear / Nearest is now applied to Source 1 RGBA and Source 2 compressed texture uploads.
+- Control panel rework: playback, clip and readout rows are grouped with a separator, the clip dropdown and sequence slider are wider, and a persistent model info readout shows triangles, bones, materials and clip count.
+
+### Fixed
+- Clip info text is no longer clipped at the right edge of the control panel; it gets its own full-width readout row.
+- HL2 beta clips whose bones froze because per-frame int16 streams were decoded as a single held RLE value.
+- HL2 beta clips with small zero-base motion blocks that produced no bone attribution and stayed static.
+- The existing `materials/filter_mode` setting was saved but never applied.
+- Stale help dialog text for beta, Source 2 and GoldSrc.
+- Version, help, About and format docs refreshed for 0.9.0.
+- On the local samples the static clips were widespread before the fix: Alyx had 121 of 341, Antlion 7 of 69 and Assassin 1 of 17. The decoder now animates those clips instead of holding the bind pose; exact remaining counts vary per model.
+
 ## [0.8.0] | Source 2 update
 
 ### Added
