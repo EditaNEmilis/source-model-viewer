@@ -129,7 +129,7 @@ def parse_dmx(path: str) -> DmxDocument:
         document.root = _parse_keyvalues2(data.decode("utf-8", errors="ignore"), document)
         return document
 
-    if encoding == "binary":
+    if encoding.startswith("binary"):
         header_end = data.find(b"\n")
 
         if header_end < 0:
@@ -141,7 +141,10 @@ def parse_dmx(path: str) -> DmxDocument:
         starts = _binary_data_starts(data, header_end)
         profiles = _binary_profiles(encoding_version)
 
-        if encoding_version >= 4:
+        if encoding_version >= 9:
+            # Source 2 writes an int32 string count after the prefix block.
+            string_modes = ["count"]
+        elif encoding_version >= 4:
             string_modes = ["bytes", "count"]
         elif encoding_version >= 2:
             string_modes = ["count", "bytes"]
@@ -488,10 +491,11 @@ def _binary_profiles(version):
 
 
 class _BinaryReader:
-    def __init__(self, data, offset=0):
+    def __init__(self, data, offset=0, encoding_version=0):
         self.data = data
         self.offset = offset
         self.context = ""
+        self.encoding_version = encoding_version
 
     def _take(self, count):
         end = self.offset + count
@@ -526,6 +530,10 @@ class _BinaryReader:
     def read_int32(self):
         offset = self._take(4)
         return struct.unpack_from("<i", self.data, offset)[0]
+
+    def read_uint64(self):
+        offset = self._take(8)
+        return struct.unpack_from("<Q", self.data, offset)[0]
 
     def read_float(self):
         offset = self._take(4)
@@ -664,14 +672,23 @@ def _parse_binary(
 
         data_start = header_end + 1
 
+    table_start = data_start
+
+    if encoding_version >= 9:
+        # Binary 9 stores a metadata "prefix element" block before the string
+        # table. Skip it so the string count lands at the right offset.
+        prefix_reader = _BinaryReader(data, data_start, encoding_version)
+        _skip_binary_prefix(prefix_reader)
+        table_start = prefix_reader.offset
+
     string_table, offset = _read_string_table(
         data,
-        data_start,
+        table_start,
         encoding_version,
         string_mode,
     )
 
-    reader = _BinaryReader(data, offset)
+    reader = _BinaryReader(data, offset, encoding_version)
 
     element_count = reader.read_int32()
 
@@ -701,6 +718,39 @@ def _parse_binary(
         document.root = elements[0]
 
     return document.root
+
+
+def _skip_binary_prefix(reader):
+    """Consume the binary 9 prefix element block.
+
+    Source 2 files can carry metadata elements before the string table so
+    tools can read it without loading the whole document. Their attribute
+    names and string values are always inline, never string table refs.
+    """
+    count = reader.read_int32()
+
+    if count < 0 or count > 1000000:
+        raise DmxParseError(
+            f"Bad DMX prefix element count {count} at offset {reader.offset}",
+            reader.offset,
+        )
+
+    inline_profile = _BinaryProfile(0, 0, 0, 0, True)
+
+    for _ in range(count):
+        attribute_count = reader.read_int32()
+
+        if attribute_count < 0 or attribute_count > 1000000:
+            raise DmxParseError(
+                f"Bad DMX prefix attribute count {attribute_count} "
+                f"at offset {reader.offset}",
+                reader.offset,
+            )
+
+        for _ in range(attribute_count):
+            reader.read_cstring()
+            type_code = reader.read_uint8()
+            _read_binary_value(reader, [], inline_profile, type_code)
 
 
 def _read_binary_element_header(reader, string_table, profile):
@@ -771,7 +821,16 @@ def _format_uuid(raw: bytes) -> str:
     )
 
 
-def _array_scalar_code(type_code):
+def _array_scalar_code(type_code, encoding_version=0):
+    # Source 2 (binary 9 / keyvalues2 4) added uint64 and uint8 scalar types
+    # and moved array ids to 32 + scalar id: element_array is 33, uint8_array
+    # is 48. The old 15..28 layout must not be applied to those files.
+    if encoding_version >= 9:
+        if 33 <= type_code <= 48:
+            return type_code - 32
+
+        return None
+
     # This engine branch uses array types starting at 15.
     if 15 <= type_code <= 31:
         scalar_code = type_code - 14
@@ -799,6 +858,15 @@ def _array_scalar_code(type_code):
 
 
 def _read_binary_value(reader, string_table, profile, type_code):
+    # uint64 and uint8 are scalar types in Source 2 binary 9; in older
+    # versions 15 and 16 are array ids instead.
+    if reader.encoding_version >= 9:
+        if type_code == 15:
+            return reader.read_uint64()
+
+        if type_code == 16:
+            return reader.read_uint8()
+
     if type_code == 1:
         index = reader.read_int32()
 
@@ -872,9 +940,10 @@ def _read_binary_value(reader, string_table, profile, type_code):
     if type_code == 14:
         return tuple(reader.read_float() for _ in range(16))
 
-    scalar_code = _array_scalar_code(type_code)
+    scalar_code = _array_scalar_code(type_code, reader.encoding_version)
+    max_scalar_code = 16 if reader.encoding_version >= 9 else 14
 
-    if scalar_code is not None and 1 <= scalar_code <= 14:
+    if scalar_code is not None and 1 <= scalar_code <= max_scalar_code:
         count = reader.read_int32()
 
         if count < 0 or count > 100000000:
@@ -1043,37 +1112,38 @@ def _to_bool(value, default=False):
     return default
 
 
-def _get_array(element, name):
-    value = _attr(element, name)
+def _get_array(element, *names):
+    for name in names:
+        value = _attr(element, name)
 
-    if isinstance(value, list):
-        return value
+        if isinstance(value, list):
+            return value
 
     return []
 
 
-def _get_int_array(element, name):
-    return [_to_int(value) for value in _get_array(element, name)]
+def _get_int_array(element, *names):
+    return [_to_int(value) for value in _get_array(element, *names)]
 
 
-def _get_float_array(element, name):
-    return [_to_float(value) for value in _get_array(element, name)]
+def _get_float_array(element, *names):
+    return [_to_float(value) for value in _get_array(element, *names)]
 
 
-def _get_vector2_array(element, name):
-    return [_to_vector2(value) for value in _get_array(element, name)]
+def _get_vector2_array(element, *names):
+    return [_to_vector2(value) for value in _get_array(element, *names)]
 
 
-def _get_vector3_array(element, name):
-    return [_to_vector3(value) for value in _get_array(element, name)]
+def _get_vector3_array(element, *names):
+    return [_to_vector3(value) for value in _get_array(element, *names)]
 
 
-def _get_quaternion_array(element, name):
-    return [_to_quaternion(value) for value in _get_array(element, name)]
+def _get_quaternion_array(element, *names):
+    return [_to_quaternion(value) for value in _get_array(element, *names)]
 
 
-def _get_time_array(element, name):
-    return [_to_float(value) for value in _get_array(element, name)]
+def _get_time_array(element, *names):
+    return [_to_float(value) for value in _get_array(element, *names)]
 
 
 def _normalize_vector(value):
@@ -1195,6 +1265,7 @@ def build_reference_model(document):
 
     min_bound = [math.inf, math.inf, math.inf]
     max_bound = [-math.inf, -math.inf, -math.inf]
+    any_flip = False
 
     for mesh in document.find_all("DmeMesh"):
         vertex_data = document.resolve(_attr(mesh, "currentState"))
@@ -1203,12 +1274,22 @@ def build_reference_model(document):
             mesh_vertex_lists.append([])
             continue
 
-        positions = _get_vector3_array(vertex_data, "positions")
-        pos_indices = _get_int_array(vertex_data, "positionsIndices")
-        normals = _get_vector3_array(vertex_data, "normals")
-        norm_indices = _get_int_array(vertex_data, "normalsIndices")
-        uvs = _get_vector2_array(vertex_data, "textureCoordinates")
-        uv_indices = _get_int_array(vertex_data, "textureCoordinatesIndices")
+        # Model format 22 (Source 2) renamed the vertex streams to
+        # position$0 / normal$0 / texcoord$0 with matching *Indices arrays.
+        positions = _get_vector3_array(vertex_data, "positions", "position$0")
+        pos_indices = _get_int_array(
+            vertex_data, "positionsIndices", "position$0Indices",
+        )
+        normals = _get_vector3_array(vertex_data, "normals", "normal$0")
+        norm_indices = _get_int_array(
+            vertex_data, "normalsIndices", "normal$0Indices",
+        )
+        uvs = _get_vector2_array(
+            vertex_data, "textureCoordinates", "texcoord$0",
+        )
+        uv_indices = _get_int_array(
+            vertex_data, "textureCoordinatesIndices", "texcoord$0Indices",
+        )
 
         flip_v = _to_int(_attr(vertex_data, "flipVCoordinates"), 0) != 0
         if flip_v:
@@ -1382,10 +1463,16 @@ def _build_vertex_targets(document, model, pos_pool_of, norm_pool_of, mesh_verte
 
             corrected = _to_bool(_attr(delta, "corrected"), False)
 
-            delta_positions = _get_vector3_array(delta, "positions")
-            delta_pos_indices = _get_int_array(delta, "positionsIndices")
-            delta_normals = _get_vector3_array(delta, "normals")
-            delta_norm_indices = _get_int_array(delta, "normalsIndices")
+            delta_positions = _get_vector3_array(
+                delta, "positions", "position$0",
+            )
+            delta_pos_indices = _get_int_array(
+                delta, "positionsIndices", "position$0Indices",
+            )
+            delta_normals = _get_vector3_array(delta, "normals", "normal$0")
+            delta_norm_indices = _get_int_array(
+                delta, "normalsIndices", "normal$0Indices",
+            )
 
             position_offsets = {}
             for j, pool_index in enumerate(delta_pos_indices):

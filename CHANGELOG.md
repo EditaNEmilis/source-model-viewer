@@ -22,6 +22,17 @@ Changelog of each versions.
 - Version, help, About and format docs refreshed for 0.9.0.
 - On the local samples the static clips were widespread before the fix: Alyx had 121 of 341, Antlion 7 of 69 and Assassin 1 of 17. The decoder now animates those clips instead of holding the bind pose; exact remaining counts vary per model.
 
+### [0.9.1]
+
+#### Added
+- DMX `binary` encoding version 9 (Source 2): the prefix element block before the string table, int32 string count, array type ids 33-48 and the `uint64` / `uint8` scalar types. All four Binary9 samples parse, with documents identical to the same models in binary 3/4/5.
+- DMX `model` format version 22: `position$0` / `normal$0` / `texcoord$0` vertex streams and their index arrays, so Source 2 model sources load geometry, UVs and shape keys instead of an empty mesh.
+- `binary_seqids` files are routed through the binary parser alongside `binary`.
+
+#### Fixed
+- DMX files without `flipVCoordinates` no longer raise `UnboundLocalError` while building the reference model, so animation-only files such as `VertexAnim.dmx` load.
+- Supported Formats and About help pages refreshed for 0.9.1.
+
 ## [0.8.0] | Source 2 update
 
 ### Added
