@@ -4,6 +4,7 @@ from PySide6.QtGui import QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
 from viewer import __version__
+from viewer.app_icon import apply_app_icon
 from viewer.main_window import MainWindow
 
 
@@ -19,6 +20,7 @@ def main():
     app.setApplicationVersion(__version__)
     app.setApplicationName("Source Model Viewer")
     app.setOrganizationName("SourceModelViewer")
+    apply_app_icon(app)
 
     window = MainWindow()
     window.show()

@@ -166,7 +166,8 @@ def _mip_image_size(fmt, width, height):
 def _bytes_per_pixel(fmt):
     if fmt in (IMAGE_FORMAT_RGBA8888, IMAGE_FORMAT_ABGR8888,
                IMAGE_FORMAT_ARGB8888, IMAGE_FORMAT_BGRA8888,
-               IMAGE_FORMAT_BGRX8888):
+               IMAGE_FORMAT_BGRX8888,
+               IMAGE_FORMAT_UVWQ8888, IMAGE_FORMAT_UVLX8888):
         return 4
     if fmt in (IMAGE_FORMAT_RGB888, IMAGE_FORMAT_BGR888,
                IMAGE_FORMAT_RGB888_BLUESCREEN, IMAGE_FORMAT_BGR888_BLUESCREEN):
@@ -178,8 +179,7 @@ def _bytes_per_pixel(fmt):
         return 2
     if fmt in (IMAGE_FORMAT_I8, IMAGE_FORMAT_A8, IMAGE_FORMAT_P8):
         return 1
-    if fmt in (IMAGE_FORMAT_RGBA16161616, IMAGE_FORMAT_RGBA16161616F,
-               IMAGE_FORMAT_UVWQ8888, IMAGE_FORMAT_UVLX8888):
+    if fmt in (IMAGE_FORMAT_RGBA16161616, IMAGE_FORMAT_RGBA16161616F):
         return 8
     if fmt == IMAGE_FORMAT_R32F:
         return 4
@@ -415,6 +415,18 @@ def _decode_image(raw, fmt, width, height):
         return _decode_a8(raw, width, height)
     if fmt == IMAGE_FORMAT_UV88:
         return _decode_uv88(raw, width, height)
+    if fmt == IMAGE_FORMAT_RGBA16161616:
+        return _decode_rgba16161616(raw, width, height)
+    if fmt == IMAGE_FORMAT_RGBA16161616F:
+        return _decode_rgba16161616f(raw, width, height)
+    if fmt in (IMAGE_FORMAT_UVWQ8888, IMAGE_FORMAT_UVLX8888):
+        return _decode_8888_quad(raw, width, height)
+    if fmt == IMAGE_FORMAT_R32F:
+        return _decode_r32f(raw, width, height)
+    if fmt == IMAGE_FORMAT_RGB323232F:
+        return _decode_rgb323232f(raw, width, height)
+    if fmt == IMAGE_FORMAT_RGBA32323232F:
+        return _decode_rgba32323232f(raw, width, height)
 
     raise VtfError(
         f"Unsupported VTF image format: "
@@ -754,6 +766,134 @@ def _decode_uv88(raw, width, height):
     out = np.empty((height, width, 4), dtype=np.uint8)
     out[:, :, 0] = arr[:, :, 0]
     out[:, :, 1] = arr[:, :, 1]
+    out[:, :, 2] = 255
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rgba16161616(raw, width, height):
+    expected = width * height * 8
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = np.frombuffer(raw[:expected], dtype=np.uint16).reshape(height, width, 4)
+    # Scale 0..65535 down to 0..255 (same idea as the 565 scaling above).
+    return (pixels.astype(np.uint32) * 255 // 65535).astype(np.uint8)
+
+
+def _float_clip_to_uint8(values):
+    cleaned = np.nan_to_num(values.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    return (np.clip(cleaned, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def _decode_rgba16161616f(raw, width, height):
+    expected = width * height * 8
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = np.frombuffer(raw[:expected], dtype=np.float16).reshape(height, width, 4)
+    return _float_clip_to_uint8(pixels)
+
+
+def _decode_8888_quad(raw, width, height):
+    # UVWQ8888 (U,V,W,Q) and UVLX8888 (U,V,L,X): four 8-bit channels.
+    # Visualized as RGBA so every channel stays visible, like UV88 above.
+    expected = width * height * 4
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    return np.frombuffer(raw[:expected], dtype=np.uint8).reshape(height, width, 4).copy()
+
+
+def _decode_r32f(raw, width, height):
+    expected = width * height * 4
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    gray = _float_clip_to_uint8(np.frombuffer(raw[:expected], dtype=np.float32).reshape(height, width))
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = gray
+    out[:, :, 1] = gray
+    out[:, :, 2] = gray
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rgb323232f(raw, width, height):
+    expected = width * height * 12
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = np.frombuffer(raw[:expected], dtype=np.float32).reshape(height, width, 3)
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, :3] = _float_clip_to_uint8(pixels)
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rgba32323232f(raw, width, height):
+    expected = width * height * 16
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = np.frombuffer(raw[:expected], dtype=np.float32).reshape(height, width, 4)
+    return _float_clip_to_uint8(pixels)
+
+
+def _decode_r16(raw, width, height):
+    expected = width * height * 2
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    gray = (np.frombuffer(raw[:expected], dtype=np.uint16).reshape(height, width).astype(np.uint32) * 255 // 65535).astype(np.uint8)
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = gray
+    out[:, :, 1] = gray
+    out[:, :, 2] = gray
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rg1616(raw, width, height):
+    expected = width * height * 4
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = (np.frombuffer(raw[:expected], dtype=np.uint16).reshape(height, width, 2).astype(np.uint32) * 255 // 65535).astype(np.uint8)
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = pixels[:, :, 0]
+    out[:, :, 1] = pixels[:, :, 1]
+    out[:, :, 2] = 255
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_r16f(raw, width, height):
+    expected = width * height * 2
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    gray = _float_clip_to_uint8(np.frombuffer(raw[:expected], dtype=np.float16).reshape(height, width))
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = gray
+    out[:, :, 1] = gray
+    out[:, :, 2] = gray
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rg1616f(raw, width, height):
+    expected = width * height * 4
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = _float_clip_to_uint8(np.frombuffer(raw[:expected], dtype=np.float16).reshape(height, width, 2))
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = pixels[:, :, 0]
+    out[:, :, 1] = pixels[:, :, 1]
+    out[:, :, 2] = 255
+    out[:, :, 3] = 255
+    return out
+
+
+def _decode_rg3232f(raw, width, height):
+    expected = width * height * 8
+    if len(raw) < expected:
+        raw = raw + b"\x00" * (expected - len(raw))
+    pixels = _float_clip_to_uint8(np.frombuffer(raw[:expected], dtype=np.float32).reshape(height, width, 2))
+    out = np.empty((height, width, 4), dtype=np.uint8)
+    out[:, :, 0] = pixels[:, :, 0]
+    out[:, :, 1] = pixels[:, :, 1]
     out[:, :, 2] = 255
     out[:, :, 3] = 255
     return out

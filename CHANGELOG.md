@@ -33,6 +33,19 @@ Changelog of each versions.
 - DMX files without `flipVCoordinates` no longer raise `UnboundLocalError` while building the reference model, so animation-only files such as `VertexAnim.dmx` load.
 - Supported Formats and About help pages refreshed for 0.9.1.
 
+### [0.9.2]
+
+#### Added
+- Headless check tooling in `viewer/tools/`: `modelcheck.py` (SMD/VTA/MDL/VMDL_C/DMX sanity checks), `texturecheck.py` (VTF/VTEX), `materialcheck.py` (VMT/VMAT_C) and `run_testfiles.py` (smoke test over the bundled test files). They reuse the viewer parsers without importing the GUI, and support `-r`, `-q`, `--strict` and `--json`.
+- Application icons wired in from `viewer/assets/icos/`: colored and black silhouette sets with 32/64px variants, applied to the app and main window and refreshed when the dialog theme changes.
+- Viewport skyboxes from `viewer/assets/skybox/`: each subfolder is one skybox, either a six-face cubemap set (VTF or common image files, with or without an underscore before the face suffix) or a single panorama image converted to cube faces. Settings Viewport tab picks the skybox with live preview behind the dialog, defaulting to the first discovered skybox; no skybox keeps the solid background color. A bundled `sky_day01` cubemap ships with the app, and the face axis mapping was verified by exact shared-edge matching between adjacent faces.
+
+#### Fixed
+- VTF `UVWQ8888` and `UVLX8888` were sized as 8 bytes per pixel instead of 4, so those files failed with an image data overrun error.
+- VTF `RGBA16161616` / `RGBA16161616F` and the float formats `R32F`, `RGB323232F` and `RGBA32323232F` had byte counts but no decoders and now decode to RGBA.
+- VTEX uncompressed 16/32-bit formats (`R16`, `RG1616`, `RGBA16161616`, `R16F`, `RG1616F`, `RGBA16161616F`, `R32F`, `RG3232F`, `RGB323232F`, `RGBA32323232F`) now decode; their mip byte counts were missing, so mip chains sliced at the wrong size.
+- Skybox faces were built without the forward offset, so every quad plane passed through the camera eye and rasterized to nothing. Skyboxes now render behind the grid and model.
+
 ## [0.8.0] | Source 2 update
 
 ### Added

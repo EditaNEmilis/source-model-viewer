@@ -217,7 +217,23 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Model assets
+# Source Assets
+# Models
 *.smd
 *.vta
 *.dmx
+*.mdl
+*.vmdl_c
+
+# Textures/Materials
+*.vtf
+*.vmt
+*.vtex_c
+*.vmat_c
+
+# Miscs
+*.dx80.vtx
+*.dx90.vtx
+*.phy
+*.sw.vtx
+*.vvd

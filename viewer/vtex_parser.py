@@ -24,6 +24,16 @@ from viewer.vtf_parser import (
     _decode_bgra8888,
     _decode_i8,
     _decode_ia88,
+    _decode_r16,
+    _decode_r16f,
+    _decode_r32f,
+    _decode_rg1616,
+    _decode_rg1616f,
+    _decode_rg3232f,
+    _decode_rgb323232f,
+    _decode_rgba16161616,
+    _decode_rgba16161616f,
+    _decode_rgba32323232f,
     _decode_rgba8888,
 )
 
@@ -77,6 +87,16 @@ _BLOCK_FORMATS = {
 _BYTES_PER_PIXEL = {
     3: 1,     # I8
     4: 4,     # RGBA8888
+    5: 2,     # R16
+    6: 4,     # RG1616
+    7: 8,     # RGBA16161616
+    8: 2,     # R16F
+    9: 4,     # RG1616F
+    10: 8,    # RGBA16161616F
+    11: 4,    # R32F
+    12: 8,    # RG3232F
+    13: 12,   # RGB323232F
+    14: 16,   # RGBA32323232F
     22: 2,    # IA88
     28: 4,    # BGRA8888
     32: 1,    # A8
@@ -256,6 +276,26 @@ def _decode_uncompressed(
         out[:, :, 2] = gray
         out[:, :, 3] = 255
         return out
+    if fmt == 5:
+        return _decode_r16(raw, width, height)
+    if fmt == 6:
+        return _decode_rg1616(raw, width, height)
+    if fmt == 7:
+        return _decode_rgba16161616(raw, width, height)
+    if fmt == 8:
+        return _decode_r16f(raw, width, height)
+    if fmt == 9:
+        return _decode_rg1616f(raw, width, height)
+    if fmt == 10:
+        return _decode_rgba16161616f(raw, width, height)
+    if fmt == 11:
+        return _decode_r32f(raw, width, height)
+    if fmt == 12:
+        return _decode_rg3232f(raw, width, height)
+    if fmt == 13:
+        return _decode_rgb323232f(raw, width, height)
+    if fmt == 14:
+        return _decode_rgba32323232f(raw, width, height)
     raise VtexError(
         f"Unsupported uncompressed VTEX format "
         f"{FORMAT_NAMES.get(fmt, f'unknown({fmt})')}"

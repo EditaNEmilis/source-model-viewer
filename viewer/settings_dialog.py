@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from viewer.skybox import discover_skyboxes
 from viewer.ui_style import dialog_stylesheet
 
 
@@ -98,6 +99,24 @@ class SettingsDialog(QDialog):
         self._update_color_btn()
         self.bg_color_btn.clicked.connect(self._pick_bg_color)
         view_form.addRow("Background Color:", self.bg_color_btn)
+
+        self.skybox_combo = QComboBox()
+        self.skybox_combo.addItem("(None - solid color)", "")
+        skybox_entries = discover_skyboxes()
+        for entry in skybox_entries:
+            self.skybox_combo.addItem(entry.label(), entry.name)
+        default_skybox = skybox_entries[0].name if skybox_entries else ""
+        saved_skybox = self.settings.value(
+            "viewport/skybox", default_skybox, type=str
+        )
+        skybox_index = self.skybox_combo.findData(saved_skybox)
+        self.skybox_combo.setCurrentIndex(max(0, skybox_index))
+        self.skybox_combo.setToolTip(
+            "Skybox folders live in viewer/assets/skybox/. "
+            "Drop a new folder there and it will show up here."
+        )
+        self.skybox_combo.currentIndexChanged.connect(self._preview_skybox)
+        view_form.addRow("Skybox:", self.skybox_combo)
 
         self.fov_spin = QSpinBox()
         self.fov_spin.setRange(10, 120)
@@ -236,6 +255,14 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
 
+    def _preview_skybox(self, _index):
+        # Live preview behind the dialog; Cancel leaves the saved
+        # setting in place, the next apply_settings() restores it.
+        parent = self.parent()
+        viewport = getattr(parent, "viewport", None)
+        if viewport is not None:
+            viewport.set_skybox(self.skybox_combo.currentData() or "")
+
     def _browse_default_mat(self):
         dir_path = QFileDialog.getExistingDirectory(
             self, "Select Default Materials Folder", self.default_mat_edit.text()
@@ -263,6 +290,9 @@ class SettingsDialog(QDialog):
         self.settings.setValue("viewport/show_grid", self.show_grid_check.isChecked())
         self.settings.setValue("viewport/show_axes", self.show_axes_check.isChecked())
         self.settings.setValue("viewport/bg_color", self.bg_color.name())
+        self.settings.setValue(
+            "viewport/skybox", self.skybox_combo.currentData() or ""
+        )
         self.settings.setValue("viewport/fov", self.fov_spin.value())
 
         self.settings.setValue("defaults/fps", self.default_fps_spin.value())

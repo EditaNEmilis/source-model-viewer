@@ -115,6 +115,10 @@ class Viewport(QOpenGLWidget):
         self.renderer.set_show_grid(enabled)
         self.update()
 
+    def set_skybox(self, name):
+        self.renderer.set_skybox(name)
+        self.update()
+
     def set_show_axes(self, enabled):
         self.renderer.set_show_axes(enabled)
         self.update()

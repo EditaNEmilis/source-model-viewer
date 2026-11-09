@@ -1,5 +1,6 @@
 import colorsys
 import os
+import sys
 import zlib
 import numpy as np
 from OpenGL.GL import (
@@ -15,6 +16,7 @@ from OpenGL.GL import (
     GL_DEPTH_TEST,
     GL_DIFFUSE,
     GL_FRONT_AND_BACK,
+    GL_FLOAT,
     GL_GREATER,
     GL_LIGHT0,
     GL_LIGHTING,
@@ -34,10 +36,12 @@ from OpenGL.GL import (
     GL_ONE_MINUS_SRC_ALPHA,
     GL_POSITION,
     GL_PROJECTION,
+    GL_QUADS,
     GL_RGBA,
     GL_REPEAT,
     GL_SRC_ALPHA,
     GL_TEXTURE_2D,
+    GL_TEXTURE_COORD_ARRAY,
     GL_TEXTURE0,
     GL_TEXTURE1,
     GL_TEXTURE2,
@@ -49,6 +53,7 @@ from OpenGL.GL import (
     GL_TEXTURE_WRAP_S,
     GL_TEXTURE_WRAP_T,
     GL_UNSIGNED_BYTE,
+    GL_VERTEX_ARRAY,
     GL_VERTEX_SHADER,
     GL_FRAGMENT_SHADER,
     GL_COMPILE_STATUS,
@@ -73,8 +78,12 @@ from OpenGL.GL import (
     glDeleteProgram,
     glDeleteShader,
     glDeleteTextures,
+    glDepthMask,
     glDisable,
+    glDisableClientState,
+    glDrawArrays,
     glEnable,
+    glEnableClientState,
     glEnd,
     glGenTextures,
     glGenerateMipmap,
@@ -97,6 +106,7 @@ from OpenGL.GL import (
     glPushMatrix,
     glRotatef,
     glShaderSource,
+    glTexCoordPointer,
     glTexImage2D,
     glTexParameteri,
     glTexEnvi,
@@ -106,6 +116,7 @@ from OpenGL.GL import (
     glUniform3f,
     glUseProgram,
     glVertex3f,
+    glVertexPointer,
     glViewport,
 )
 from OpenGL.GL.ARB.texture_compression_bptc import GL_COMPRESSED_RGBA_BPTC_UNORM_ARB
@@ -326,6 +337,12 @@ class Renderer:
         self._model_shader = None
         self._model_uniforms = {}
 
+        self.skybox_name = ""
+        self._skybox_faces = None
+        self._skybox_textures = []
+        self._skybox_dirty = False
+        self.skybox_error = ""
+
     def initialize(self):
         glActiveTexture(GL_TEXTURE0)
         glClearColor(*self.background_color)
@@ -357,6 +374,7 @@ class Renderer:
         glLoadIdentity()
         glLightfv(GL_LIGHT0, GL_POSITION, (0.4, 0.4, 1.0, 0.0))
         self.camera.apply()
+        self._draw_skybox()
         if self.show_grid:
             self._draw_grid()
         if self.show_axes:
@@ -367,6 +385,126 @@ class Renderer:
 
     def set_background_color(self, r, g, b, a=1.0):
         self.background_color = (float(r), float(g), float(b), float(a))
+
+    # ------------------------------------------------------------------
+    # Skybox
+    # ------------------------------------------------------------------
+
+    def set_skybox(self, name):
+        """Load a skybox from viewer/assets/skybox/ by name.
+
+        An empty name or None clears the skybox (solid color returns).
+        Returns True when a skybox is active after the call.
+        """
+        self.skybox_name = name or ""
+        if not self.skybox_name:
+            self._skybox_faces = None
+            self._skybox_dirty = True
+            return False
+
+        from viewer.skybox import load_skybox
+
+        try:
+            faces = load_skybox(self.skybox_name)
+        except Exception as error:
+            self.skybox_error = str(error)
+            print(f"skybox load failed for {self.skybox_name!r}: {error}", file=sys.stderr)
+            self._skybox_faces = None
+            self._skybox_dirty = True
+            return False
+
+        self.skybox_error = ""
+        self._skybox_faces = faces
+        self._skybox_dirty = True
+        return True
+
+    def set_skybox_faces(self, faces, name=""):
+        """Inject preloaded faces (six RGBA arrays in skybox FACE_ORDER)."""
+        self.skybox_name = name
+        self._skybox_faces = list(faces) if faces else None
+        self._skybox_dirty = True
+
+    def _ensure_skybox_textures(self):
+        if not self._skybox_dirty:
+            return self._skybox_textures
+
+        for tex_id in self._skybox_textures:
+            if tex_id:
+                glDeleteTextures(1, [tex_id])
+        self._skybox_textures = []
+
+        if self._skybox_faces:
+            for rgba in self._skybox_faces:
+                # Face arrays are top-row-first; flip so texture v=0 is
+                # the bottom row as OpenGL expects.
+                self._skybox_textures.append(
+                    self._upload_rgba_texture(np.ascontiguousarray(rgba[::-1]))
+                )
+        self._skybox_dirty = False
+        return self._skybox_textures
+
+    def _draw_skybox(self):
+        # Run cleanup/upload even after the skybox was cleared, so
+        # the old GL textures are deleted instead of leaked.
+        textures = self._ensure_skybox_textures()
+        if not self._skybox_faces or len(textures) != len(self._skybox_faces):
+            return
+
+        from viewer.skybox import FACE_ORDER, face_basis
+
+        eye = self.camera.eye()
+        half = 10.0
+
+        # Build one quad per face as client arrays, the same way the
+        # model mesh is drawn, instead of immediate mode.
+        vertices = []
+        texcoords = []
+        for suffix in FACE_ORDER:
+            forward, right, true_up = face_basis(suffix)
+            # Each face is offset from the center along its forward
+            # direction; without that offset every quad passes through
+            # the eye and is edge-on (invisible).
+            face_center = forward * half
+            corners = [
+                (face_center + right * -half + true_up * -half, (0.0, 0.0)),
+                (face_center + right * half + true_up * -half, (1.0, 0.0)),
+                (face_center + right * half + true_up * half, (1.0, 1.0)),
+                (face_center + right * -half + true_up * half, (0.0, 1.0)),
+            ]
+            for offset, (u, v) in corners:
+                vertices.append([offset[0], offset[1], offset[2]])
+                texcoords.append([u, v])
+        vertex_array = np.ascontiguousarray(vertices, dtype=np.float32)
+        texcoord_array = np.ascontiguousarray(texcoords, dtype=np.float32)
+
+        glPushMatrix()
+        glTranslatef(eye[0], eye[1], eye[2])
+        glDisable(GL_LIGHTING)
+        glDisable(GL_CULL_FACE)
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(False)
+        glEnable(GL_TEXTURE_2D)
+        glActiveTexture(GL_TEXTURE0)
+        # Fixed-function texturing multiplies by the current color;
+        # reset it so the sky is not tinted by the axes from last frame.
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+        try:
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+            glVertexPointer(3, GL_FLOAT, 0, vertex_array)
+            glTexCoordPointer(2, GL_FLOAT, 0, texcoord_array)
+            for index, tex_id in enumerate(textures):
+                glBindTexture(GL_TEXTURE_2D, tex_id)
+                glDrawArrays(GL_QUADS, index * 4, 4)
+        finally:
+            glBindTexture(GL_TEXTURE_2D, 0)
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+            glDisableClientState(GL_VERTEX_ARRAY)
+            glDisable(GL_TEXTURE_2D)
+            glDepthMask(True)
+            glEnable(GL_DEPTH_TEST)
+            glPopMatrix()
 
     def set_show_grid(self, enabled):
         self.show_grid = bool(enabled)

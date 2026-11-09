@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from viewer.app_icon import apply_app_icon
 from viewer.flex_info import parse_flex_info
 from viewer.dmx_parser import is_dmx_file, load_dmx
 from viewer.mdl_parser import is_mdl_file, is_vmdl_c_file, parse_mdl
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         QCoreApplication.setApplicationName("SourceModelViewer")
 
         self.setWindowTitle("Source Model Viewer")
+        apply_app_icon(self)
         self.resize(1024, 768)
         self._geometry_restored = False
 
@@ -1668,6 +1670,19 @@ class MainWindow(QMainWindow):
             qcolor.redF(), qcolor.greenF(), qcolor.blueF(), 1.0
         )
 
+        skybox_name = settings.value("viewport/skybox", None, type=str)
+        if skybox_name is None:
+            from viewer.skybox import discover_skyboxes
+
+            entries = discover_skyboxes()
+            skybox_name = entries[0].name if entries else ""
+        self.viewport.set_skybox(skybox_name)
+        skybox_error = getattr(self.viewport.renderer, "skybox_error", "")
+        if skybox_name and skybox_error:
+            self.statusBar().showMessage(
+                f"Skybox {skybox_name!r} could not be loaded: {skybox_error}"
+            )
+
         show_grid = settings.value("viewport/show_grid", True, type=bool)
         self.viewport.renderer.set_show_grid(show_grid)
         self.show_grid_action.setChecked(show_grid)
@@ -1721,6 +1736,9 @@ class MainWindow(QMainWindow):
         self.viewport.set_animation_mode("shape" if shape_mode_default else "sequence")
 
         # Window and appearance
+        theme = settings.value("window/theme", 0, type=int)
+        apply_app_icon(self, theme=theme)
+
         show_controls = settings.value("window/show_controls", True, type=bool)
         self.show_controls_action.setChecked(show_controls)
         self.controls_frame.setVisible(show_controls)
@@ -1735,4 +1753,8 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         if dialog.exec():
             self.apply_settings()
-            self.statusBar().showMessage("Settings saved")
+            # apply_settings() may already have shown a skybox error;
+            # do not overwrite it with the generic message.
+            skybox_error = getattr(self.viewport.renderer, "skybox_error", "")
+            if not skybox_error:
+                self.statusBar().showMessage("Settings saved")
