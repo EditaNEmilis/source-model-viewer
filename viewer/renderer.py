@@ -526,7 +526,11 @@ class Renderer:
     # Model loading
     # ------------------------------------------------------------------
 
-    def set_model(self, model):
+    def set_model(self, model, preserve_view=False):
+        """Load a model. ``preserve_view`` keeps the camera, model offset and
+        current animation frame, which lets callers swap geometry in place
+        (bodygroup switching)."""
+        preserved_frame = float(self.skinning.frame) if preserve_view else None
         self.model = model
         self.model_material_dirs = []
         if model and hasattr(model, "metadata") and "material_dirs" in model.metadata:
@@ -536,7 +540,8 @@ class Renderer:
                 if d
             ]
 
-        self.reset_model_transform()
+        if not preserve_view:
+            self.reset_model_transform()
         self._static_positions = None
         self._static_normals = None
         self.rig = None
@@ -558,12 +563,16 @@ class Renderer:
             if model.uv_pre_flipped:
                 texcoords[:, 1] = 1.0 - texcoords[:, 1]
 
-            self.model_center = [
-                (model.min_bound[0] + model.max_bound[0]) * 0.5,
-                (model.min_bound[1] + model.max_bound[1]) * 0.5,
-                (model.min_bound[2] + model.max_bound[2]) * 0.5,
-            ]
-            self.reset_camera()
+            # The grid and axes are drawn around the model center. Keep the
+            # original center during a bodygroup swap, otherwise the ground
+            # jumps when a variant has different bounds.
+            if not preserve_view:
+                self.model_center = [
+                    (model.min_bound[0] + model.max_bound[0]) * 0.5,
+                    (model.min_bound[1] + model.max_bound[1]) * 0.5,
+                    (model.min_bound[2] + model.max_bound[2]) * 0.5,
+                ]
+                self.reset_camera()
 
             colors = self._build_colors()
             indices = self._build_material_batches()
@@ -580,7 +589,8 @@ class Renderer:
                 )
         else:
             self.model_center = [0.0, 0.0, 0.0]
-            self.camera.reset()
+            if not preserve_view:
+                self.camera.reset()
 
         if model and model.bones:
             reference_transforms = {}
@@ -597,7 +607,10 @@ class Renderer:
         self._gpu_normals = self._static_normals
         self._buffers_dirty = False
 
-        self.set_skeletal_frame(self.skinning.frame)
+        if preserved_frame is not None:
+            self.set_skeletal_frame(preserved_frame)
+        else:
+            self.set_skeletal_frame(self.skinning.frame)
 
         self.embedded_textures = dict(getattr(model, "embedded_textures", {}) or {})
 
@@ -773,6 +786,66 @@ class Renderer:
             except ValueError:
                 pass
         return (1.0, 1.0, 1.0, 1.0)
+
+    def material_report(self):
+        """Describe every material used by the loaded mesh.
+
+        Returns one dict per material with ``name``, the resolved
+        ``texture`` path, a short ``status`` and a ``detail`` path for the
+        intermediate file (VMT or VMAT). Used by the View > Materials
+        dialog; nothing is uploaded or cached here.
+        """
+        model = self.model
+        if model is None:
+            return []
+
+        names = sorted({triangle.material for triangle in model.triangles})
+        embedded = self.embedded_textures or {}
+        source2 = self._is_source2_model()
+        report = []
+
+        for name in names:
+            entry = {"name": name, "texture": "", "detail": "", "status": "missing"}
+
+            if name in embedded:
+                entry["status"] = "embedded"
+                entry["texture"] = "embedded in MDL"
+                report.append(entry)
+                continue
+
+            if source2:
+                vmat_path = self._find_source2_material(name)
+                entry["detail"] = vmat_path or ""
+                reference = None
+                if vmat_path:
+                    try:
+                        material = parse_vmat_c(vmat_path)
+                        reference = pick_color_texture(material)
+                    except (VmatError, OSError):
+                        reference = None
+
+                if reference:
+                    texture_path = self._resolve_source2_texture(reference)
+                    entry["texture"] = texture_path or reference
+                    if texture_path:
+                        entry["status"] = "ok"
+                report.append(entry)
+                continue
+
+            vmt_path = self._resolve_path(name, ".vmt")
+            entry["detail"] = vmt_path or ""
+            vtf_path = self._find_vtf_file(name)
+
+            if vtf_path:
+                entry["status"] = "ok"
+                entry["texture"] = vtf_path
+            elif vmt_path:
+                entry["status"] = "vmt only"
+                entry["texture"] = vmt_path
+
+            report.append(entry)
+
+        return report
 
     def _load_material_texture(self, material_name):
         if material_name in self.texture_cache:
@@ -1159,10 +1232,11 @@ class Renderer:
     # Skeletal animation
     # ------------------------------------------------------------------
 
-    def set_skeletal_animation_model(self, model):
+    def set_skeletal_animation_model(self, model, preserve_frame=False):
+        frame = self.skinning.frame if preserve_frame else 0.0
         self.skeletal_animation_source = model
         self._rebuild_skeletal()
-        self.set_skeletal_frame(0.0)
+        self.set_skeletal_frame(frame)
 
     def clear_skeletal_animation(self):
         self.skeletal_animation_source = None

@@ -88,6 +88,7 @@ def controls_html(theme=DARK_THEME):
         ("Ctrl + Left drag", "Move model"),
         ("M", "Toggle model move mode, then Left drag"),
         ("Ctrl + O", "Open model (SMD, VTA, DMX, MDL, VMDL_C)"),
+        ("Drag and drop", "Drop one of those model files onto the window"),
         ("Ctrl + ,", "Open Settings dialog"),
         ("Ctrl + Shift + M", "Set materials folder manually"),
         ("Ctrl + R", "Reset camera"),
@@ -105,8 +106,14 @@ def controls_html(theme=DARK_THEME):
         ("Model info label",
          "Triangles, bones, materials and clip count of the loaded model"),
         ("Clip dropdown", "Switch between animation clips (DMX, SMD, MDL, GoldSrc, beta probe)"),
+        ("Blend dropdown",
+         "Pick a blend direction when a sequence has several blends, such as walk_all"),
         ("Sequence slider", "Scrub through skeletal animation (SMD, DMX, MDL, GoldSrc, beta clips)"),
         ("Driver checkbox", "Let a driver bone control Intensity and Progress"),
+        ("Bodygroup dropdowns",
+         "Pick a GoldSrc model variant for each bodypart"),
+        ("View > Materials...",
+         "List materials, their texture paths and any missing textures"),
     ]
 
     table = "<table>"
@@ -212,7 +219,9 @@ def formats_html(theme=DARK_THEME):
         "bone hierarchy, bind pose, skin family 0 translation, and embedded "
         "8-bit palettized textures, including external <code>T.mdl</code> "
         "texture companion files (case-insensitive). Masked textures use binary "
-        "transparency. Local sequence group 0 decodes to playable clips. "
+        "transparency. Each bodypart exposes its model variants through the "
+        "bodygroup dropdowns, and only the selected variant is drawn. "
+        "Local sequence group 0 decodes to playable clips. "
         "External <code>IDSQ</code> animation libraries "
         "explain themselves instead of failing to load.</p>"
         "<h2>HL1 alpha MDL (v6)</h2>"
@@ -222,7 +231,8 @@ def formats_html(theme=DARK_THEME):
         "<h2>HL2 beta MDL (v37)</h2>"
         "<p>2001-2003 era builds: 64-byte vertices, 196-byte bones, 68-byte meshes, "
         "and version 6 VTX strips. Geometry loads, including multi-bodypart "
-        "models. Sequences decode into playable per-bone rotation clips with fps "
+        "models, and the bodygroup dropdowns switch each bodypart variant. "
+        "Sequences decode into playable per-bone rotation clips with fps "
         "and looping flags; root and position motion is not decoded, so clips play "
         "in place (a known limitation).</p>"
         "<h2>Source 2 VMDL_C</h2>"

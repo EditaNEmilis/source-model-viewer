@@ -4,19 +4,25 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtCore import QCoreApplication, QSettings
 from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +59,10 @@ class MainWindow(QMainWindow):
         self.animation_targets = []
         self.flex_info = None
         self.flex_info_override = False
+        self._bodygroup_model = None
+        self._bodygroup_selection = []
+
+        self.setAcceptDrops(True)
 
         self.viewport = Viewport(self)
         self.viewport.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -153,6 +163,10 @@ class MainWindow(QMainWindow):
         self.clip_combo.setToolTip("Select animation clip")
         self.clip_combo.currentIndexChanged.connect(self.clip_changed)
 
+        self.blend_combo = QComboBox()
+        self.blend_combo.setToolTip("Select a blend direction for this sequence")
+        self.blend_combo.currentIndexChanged.connect(self.blend_changed)
+
         self.sequence_slider = QSlider(Qt.Horizontal)
         self.sequence_slider.setEnabled(False)
         self.sequence_slider.setRange(0, 1000)
@@ -203,9 +217,38 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(QLabel("Sequence"), 2, 4)
         controls_layout.addWidget(self.sequence_slider, 2, 5, 1, 2)
 
-        # Row 3 / 4: persistent readouts, separated from the controls.
-        controls_layout.addWidget(separator, 3, 0, 1, 7)
-        controls_layout.addWidget(info_strip, 4, 0, 1, 7)
+        # Row 3: blend selector for multi-blend sequences.
+        self.blend_bar = QWidget()
+        blend_layout = QHBoxLayout(self.blend_bar)
+        blend_layout.setContentsMargins(0, 0, 0, 0)
+        blend_layout.setSpacing(6)
+        blend_layout.addWidget(QLabel("Blend"))
+        blend_layout.addWidget(self.blend_combo)
+        blend_layout.addStretch(1)
+        self.blend_bar.setVisible(False)
+        controls_layout.addWidget(self.blend_bar, 3, 0, 1, 7)
+
+        # Row 4: bodygroup selectors, one combo per bodypart. Hidden for
+        # formats without bodygroup metadata. The scroll area keeps long
+        # selector rows (beta models have many bodyparts) from widening
+        # the window.
+        self.bodygroup_bar = QWidget()
+        self.bodygroup_layout = QHBoxLayout(self.bodygroup_bar)
+        self.bodygroup_layout.setContentsMargins(0, 0, 0, 0)
+        self.bodygroup_layout.setSpacing(6)
+        self.bodygroup_scroll = QScrollArea()
+        self.bodygroup_scroll.setFrameShape(QFrame.NoFrame)
+        self.bodygroup_scroll.setWidgetResizable(False)
+        self.bodygroup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.bodygroup_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.bodygroup_scroll.setFixedHeight(34)
+        self.bodygroup_scroll.setWidget(self.bodygroup_bar)
+        self.bodygroup_scroll.setVisible(False)
+        controls_layout.addWidget(self.bodygroup_scroll, 4, 0, 1, 7)
+
+        # Row 5 / 6: persistent readouts, separated from the controls.
+        controls_layout.addWidget(separator, 5, 0, 1, 7)
+        controls_layout.addWidget(info_strip, 6, 0, 1, 7)
 
         controls_layout.setColumnStretch(2, 1)
         controls_layout.setColumnStretch(5, 1)
@@ -222,6 +265,7 @@ class MainWindow(QMainWindow):
         self._create_menus()
 
         self._clip_models = []
+        self._blend_models = []
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self.advance_frame)
@@ -426,6 +470,12 @@ class MainWindow(QMainWindow):
         )
         self.materials_folder_action.triggered.connect(self.set_materials_folder)
 
+        self.materials_action = QAction("&Materials...", self)
+        self.materials_action.setStatusTip(
+            "List the model materials, their textures and any that are missing"
+        )
+        self.materials_action.triggered.connect(self.show_materials)
+
     def _create_menus(self):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_action)
@@ -448,6 +498,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_grid_action)
         view_menu.addAction(self.show_axes_action)
         view_menu.addAction(self.show_controls_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.materials_action)
         view_menu.addSeparator()
         view_menu.addAction(self.solid_view_action)
         view_menu.addAction(self.uv_checker_action)
@@ -509,6 +561,9 @@ class MainWindow(QMainWindow):
             qualifiers.append(f"group {sequence_group}")
         if blend_count > 1:
             qualifiers.append(f"blend {blend_index + 1}/{blend_count}")
+        sequence_blends = metadata.get("sequence_blends") or []
+        if len(sequence_blends) > 1:
+            qualifiers.append(f"{len(sequence_blends)} blends")
         if metadata.get("fallback"):
             qualifiers.append("bind pose")
         if duplicate_name:
@@ -546,6 +601,8 @@ class MainWindow(QMainWindow):
         self.sequence_slider.setValue(0)
         self.sequence_slider.blockSignals(False)
 
+        self._update_blend_selector()
+
         self.stop_playback()
         self.update_animation_ui()
 
@@ -557,6 +614,7 @@ class MainWindow(QMainWindow):
 
         self._set_animation_clips([])
         self.viewport.set_model(parsed)
+        self._set_bodygroups(parsed)
 
         targets = getattr(parsed, "vertex_targets", []) or []
         self.animation_targets = targets
@@ -594,6 +652,9 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
+        self.load_model_file(file_path)
+
+    def load_model_file(self, file_path):
         if is_dmx_file(file_path):
             self.open_dmx_model(file_path)
             return
@@ -645,6 +706,7 @@ class MainWindow(QMainWindow):
 
             self.viewport.set_model(parsed)
             self.viewport.set_animation_targets(self.animation_targets)
+            self._set_bodygroups(None)
 
             self.stop_playback()
             self.update_animation_ui()
@@ -725,6 +787,53 @@ class MainWindow(QMainWindow):
         if auto_mount_enabled:
             self._auto_add_materials_root(file_path)
 
+    @staticmethod
+    def _model_paths_from_mime(mime_data):
+        if mime_data is None or not mime_data.hasUrls():
+            return []
+        paths = []
+        for url in mime_data.urls():
+            if url.isLocalFile():
+                paths.append(url.toLocalFile())
+        return paths
+
+    @staticmethod
+    def _is_model_path(path):
+        return path.lower().endswith((".smd", ".vta", ".dmx", ".mdl", ".vmdl_c"))
+
+    def dragEnterEvent(self, event):
+        paths = self._model_paths_from_mime(event.mimeData())
+        if any(self._is_model_path(path) for path in paths):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData() and event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = [
+            path
+            for path in self._model_paths_from_mime(event.mimeData())
+            if self._is_model_path(path)
+        ]
+        if not paths:
+            event.ignore()
+            return
+
+        event.acceptProposedAction()
+
+        if len(paths) > 1:
+            self.statusBar().showMessage(
+                f"Loading {os.path.basename(paths[0])}; "
+                f"{len(paths) - 1} other file(s) ignored"
+            )
+
+        self.load_model_file(paths[0])
+
     def open_dmx_model(self, file_path):
         try:
             reference_model, animation_clips = load_dmx(file_path)
@@ -746,6 +855,7 @@ class MainWindow(QMainWindow):
 
             self.viewport.set_model(reference_model)
             self.viewport.set_animation_targets(self.animation_targets)
+            self._set_bodygroups(None)
 
             loaded_something = True
 
@@ -955,6 +1065,166 @@ class MainWindow(QMainWindow):
                 return candidate
 
         return None
+
+    def show_materials(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Materials")
+        dialog.resize(780, 460)
+        layout = QVBoxLayout(dialog)
+
+        summary = QLabel("")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        table = QTableWidget(0, 3, dialog)
+        table.setHorizontalHeaderLabels(["Material", "Texture", "Status"])
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        layout.addWidget(table, 1)
+
+        def fill():
+            rows = self.viewport.renderer.material_report()
+            table.setRowCount(len(rows))
+
+            for row, entry in enumerate(rows):
+                name_item = QTableWidgetItem(entry["name"])
+                texture_item = QTableWidgetItem(entry["texture"] or "")
+                status_item = QTableWidgetItem(entry["status"])
+
+                if entry["detail"]:
+                    name_item.setToolTip(entry["detail"])
+                if entry["texture"]:
+                    texture_item.setToolTip(entry["texture"])
+                if entry["status"] == "missing":
+                    status_item.setForeground(QColor("#e06c75"))
+                elif entry["status"] in ("ok", "embedded"):
+                    status_item.setForeground(QColor("#98c379"))
+
+                table.setItem(row, 0, name_item)
+                table.setItem(row, 1, texture_item)
+                table.setItem(row, 2, status_item)
+
+            missing = sum(1 for entry in rows if entry["status"] == "missing")
+            if rows:
+                summary.setText(
+                    f"{len(rows)} materials, {missing} missing. "
+                    "Hover a material for its VMT or VMAT path."
+                )
+            else:
+                summary.setText("No materials loaded.")
+            table.resizeRowsToContents()
+
+        fill()
+
+        buttons = QHBoxLayout()
+        folder_button = QPushButton("Set Materials Folder...")
+        close_button = QPushButton("Close")
+
+        def choose_folder():
+            dir_path = QFileDialog.getExistingDirectory(
+                dialog, "Select Materials Directory", ""
+            )
+            if dir_path:
+                self.viewport.renderer.add_material_directory(dir_path)
+                self.viewport.update()
+                fill()
+                self.statusBar().showMessage(f"Materials folder: {dir_path}")
+
+        folder_button.clicked.connect(choose_folder)
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(folder_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+
+    def _clear_bodygroup_widgets(self):
+        while self.bodygroup_layout.count():
+            item = self.bodygroup_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _set_bodygroups(self, model):
+        self._clear_bodygroup_widgets()
+        self._bodygroup_model = model
+        self._bodygroup_selection = []
+
+        metadata = (getattr(model, "metadata", None) or {}) if model else {}
+        groups = metadata.get("bodygroups") or []
+        if not groups:
+            self.bodygroup_scroll.setVisible(False)
+            return
+
+        saved = metadata.get("bodygroup_selection") or []
+        added = False
+
+        for group_index, group in enumerate(groups):
+            options = group.get("options") or []
+            name = group.get("name") or f"Body {group_index + 1}"
+
+            if not options:
+                self._bodygroup_selection.append(0)
+                continue
+
+            label = QLabel(name)
+            label.setToolTip(f"Bodygroup: {name}")
+
+            combo = QComboBox()
+            combo.setMaximumWidth(190)
+            for option_index, option_name in enumerate(options):
+                combo.addItem(option_name or f"Option {option_index + 1}", option_index)
+            combo.setToolTip("Options: " + ", ".join(options))
+
+            current = saved[group_index] if group_index < len(saved) else 0
+            try:
+                current = int(current)
+            except (TypeError, ValueError):
+                current = 0
+            current = max(0, min(current, max(0, len(options) - 1)))
+            combo.setCurrentIndex(current)
+            self._bodygroup_selection.append(current)
+            combo.currentIndexChanged.connect(
+                lambda choice, index=group_index: self.bodygroup_changed(index, choice)
+            )
+
+            self.bodygroup_layout.addWidget(label)
+            self.bodygroup_layout.addWidget(combo)
+            added = True
+
+        if added:
+            self.bodygroup_layout.activate()
+            self.bodygroup_bar.adjustSize()
+        self.bodygroup_scroll.setVisible(added)
+
+    def bodygroup_changed(self, group_index, choice):
+        if self._bodygroup_model is None:
+            return
+        if not 0 <= group_index < len(self._bodygroup_selection):
+            return
+
+        self._bodygroup_selection[group_index] = int(choice)
+
+        from viewer.smd_parser import compose_bodygroup_model
+
+        composed = compose_bodygroup_model(
+            self._bodygroup_model, self._bodygroup_selection
+        )
+        if composed is self._bodygroup_model:
+            return
+
+        self.viewport.set_model(composed, preserve_view=True)
+        self.viewport.update()
+        self.update_model_info()
+        self.statusBar().showMessage(
+            f"Bodygroup {group_index + 1} set to option {int(choice) + 1}"
+        )
 
     def _try_auto_flex_info(self, file_path):
         base_path = os.path.splitext(file_path)[0]
@@ -1634,10 +1904,48 @@ class MainWindow(QMainWindow):
     def clip_changed(self, index):
         if index >= 0 and self.viewport:
             self.viewport.set_animation_clip(index)
+            self._update_blend_selector()
             self.sequence_slider.setValue(0)
             self.stop_playback()
             self.update_animation_ui()
             self._maybe_autoplay()
+
+    def _update_blend_selector(self):
+        self.blend_combo.blockSignals(True)
+        self.blend_combo.clear()
+        self._blend_models = []
+
+        model = None
+        index = self.clip_combo.currentIndex()
+        if 0 <= index < len(self._clip_models):
+            model = self._clip_models[index][1]
+
+        metadata = (getattr(model, "metadata", None) or {}) if model else {}
+        blends = metadata.get("sequence_blends") or []
+        self._blend_models = blends
+
+        for blend_index, blend in enumerate(blends):
+            frames = len(getattr(blend.get("model"), "frames", []) or [])
+            self.blend_combo.addItem(
+                f"{blend_index + 1} of {len(blends)} ({frames}f)", blend_index
+            )
+        self.blend_combo.setCurrentIndex(0)
+        self.blend_combo.blockSignals(False)
+        self.blend_bar.setVisible(len(blends) > 1)
+
+    def blend_changed(self, index):
+        if not 0 <= index < len(self._blend_models):
+            return
+
+        model = self._blend_models[index].get("model")
+        if model is None:
+            return
+
+        self.viewport.set_skeletal_animation_model(model, preserve_frame=True)
+        self.update_frame_label()
+        self.statusBar().showMessage(
+            f"Blend {index + 1} of {len(self._blend_models)}"
+        )
 
     def sequence_progress_changed(self, value):
         progress = value / 1000.0

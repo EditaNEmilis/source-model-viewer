@@ -33,8 +33,8 @@ class Viewport(QOpenGLWidget):
     def paintGL(self):
         self.renderer.paint()
 
-    def set_model(self, model: SmdModel):
-        self.renderer.set_model(model)
+    def set_model(self, model: SmdModel, preserve_view=False):
+        self.renderer.set_model(model, preserve_view=preserve_view)
         self.update()
 
     def set_animation_targets(self, targets):
@@ -57,8 +57,10 @@ class Viewport(QOpenGLWidget):
         self.renderer.set_intensity(intensity)
         self.update()
 
-    def set_skeletal_animation_model(self, model):
-        self.renderer.set_skeletal_animation_model(model)
+    def set_skeletal_animation_model(self, model, preserve_frame=False):
+        self.renderer.set_skeletal_animation_model(
+            model, preserve_frame=preserve_frame
+        )
         self.update()
 
     def clear_skeletal_animation(self):

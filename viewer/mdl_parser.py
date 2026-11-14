@@ -559,6 +559,76 @@ def _locate_vtx_chain(vtx_data: bytes, mdl_topology, vert_limit: int):
     return best_chain
 
 
+def _locate_vtx_chain_v6(vtx_data: bytes, mesh_counts, vert_limit: int):
+    """Locate the beta (VTX version 6) LOD chain by validated mesh counts.
+
+    The 2001-2003 branch lays out its model, LOD and mesh tables with
+    different strides than retail files: LOD blocks are 12 or 24 bytes
+    apart and mesh headers are 9 bytes. Matching the MDL mesh counts
+    against every candidate chain and validating each strip group is more
+    reliable than guessing every table offset.
+    """
+    n = len(vtx_data)
+    if not mesh_counts:
+        return None
+
+    scan_end = min(max(0, n - 12), 0x4000)
+
+    for stride in (24, 12):
+        for start in range(0x24, scan_end, 4):
+            if struct.unpack_from("<i", vtx_data, start)[0] != mesh_counts[0]:
+                continue
+
+            entries = []
+            counts_ok = True
+            for index, expected in enumerate(mesh_counts):
+                lod = start + index * stride
+                if lod + 12 > n:
+                    counts_ok = False
+                    break
+                num_meshes, mesh_offset = struct.unpack_from("<2i", vtx_data, lod)
+                if num_meshes != expected or not (0 < mesh_offset < n):
+                    counts_ok = False
+                    break
+                mesh_array = lod + mesh_offset
+                if mesh_array >= n:
+                    counts_ok = False
+                    break
+                entries.append((mesh_array, num_meshes))
+
+            if not counts_ok:
+                continue
+
+            groups_ok = True
+            for mesh_array, num_meshes in entries:
+                for mesh_i in range(num_meshes):
+                    mesh_pos = mesh_array + mesh_i * 9
+                    if mesh_pos + 8 > n:
+                        groups_ok = False
+                        break
+                    num_groups, group_offset = struct.unpack_from(
+                        "<2i", vtx_data, mesh_pos
+                    )
+                    if not (0 < num_groups <= 1024) or not (0 < group_offset < 2000000):
+                        groups_ok = False
+                        break
+                    if not _valid_vtx_group(
+                        vtx_data, mesh_pos + group_offset, vert_limit
+                    ):
+                        groups_ok = False
+                        break
+                if not groups_ok:
+                    break
+
+            if groups_ok:
+                return [
+                    {"mesh_array": mesh_array, "count": num_meshes, "stride": 9}
+                    for mesh_array, num_meshes in entries
+                ]
+
+    return None
+
+
 ### HL2 beta (version 37) support ###
 
 BETA_BONE_STRIDE = 196
@@ -1782,105 +1852,80 @@ def _parse_mdl_beta(mdl_path):
             slots.append(pos)
             pos += stride
 
-    # Assign slots to bodyparts in order, deriving the VTX topology from
-    # the real slot addresses instead of guessing the model stride.
-    topology = []
-    total_verts = 0
-    chosen_pools = []
+    # Build per-bodypart variant tables from the model slots. Bodyparts
+    # whose variants carry no geometry are kept out of the VTX chain.
+    variant_groups = []
     slot_i = 0
-    for _bpp, nummodels, _modelindex in bp_entries:
-        take = slots[slot_i:slot_i + nummodels]
-        slot_i += nummodels
-        counts = []
-        for mo in take:
-            try:
-                nm_count = unpack("<i", mo + 72)[0]
-                nv_count = unpack("<i", mo + 80)[0]
-            except struct.error:
-                nm_count, nv_count = 0, 0
-            if nm_count >= 4096:
-                nm_count = 0
-            counts.append(max(0, nm_count))
-            if nm_count:
-                total_verts += max(0, min(nv_count, 100000))
-        topology.append((nummodels, counts))
-        chosen = None
-        for mo in take:
-            if unpack("<i", mo + 72)[0] > 0:
-                chosen = mo
-                break
-        if chosen is None and take:
-            chosen = take[0]
-        if chosen is None:
-            chosen_pools.append(None)
-            continue
+    total_verts = 0
 
-        nummeshes = unpack("<i", chosen + 72)[0]
-        meshindex = unpack("<i", chosen + 76)[0]
-        numverts = unpack("<i", chosen + 80)[0]
-        vertexindex = unpack("<i", chosen + 84)[0]
-        chosen_pools.append(
-            {
-                "addr": chosen,
-                "nummeshes": max(0, min(nummeshes, 4096)),
-                "mesh_table": chosen + meshindex,
-                "pool": chosen + vertexindex,
-                "numverts": max(0, min(numverts, 100000)),
+    for bpp, nummodels, _modelindex in bp_entries:
+        name_index = unpack("<i", bpp)[0]
+        group_name = cstr(bpp + name_index) or f"bodypart_{len(variant_groups)}"
+        options = []
+
+        for m_i in range(nummodels):
+            if slot_i >= len(slots):
+                break
+            addr = slots[slot_i]
+            slot_i += 1
+
+            nummeshes = max(0, min(unpack("<i", addr + 72)[0], 4096))
+            meshindex = unpack("<i", addr + 76)[0]
+            numverts = max(0, min(unpack("<i", addr + 80)[0], 100000))
+            vertexindex = unpack("<i", addr + 84)[0]
+
+            option = {
+                "name": cstr(addr) or f"option_{m_i}",
+                "nummeshes": nummeshes,
+                "mesh_table": addr + meshindex,
+                "numverts": numverts,
+                "pool": addr + vertexindex,
+                "vertex_start": 0,
+                "vertex_end": 0,
+                "triangle_start": 0,
+                "triangle_end": 0,
             }
-        )
+            if nummeshes > 0 and numverts > 0:
+                total_verts += numverts
+            options.append(option)
+
+        variant_groups.append({"name": group_name, "options": options})
+
+    geometry_options = [
+        option
+        for group in variant_groups
+        for option in group["options"]
+        if option["nummeshes"] > 0 and option["numverts"] > 0
+    ]
 
     vtx_chain = None
-    if vtx_data and total_verts > 0:
-        # Bodygroups without meshes have no vtx representation; locate the
-        # chain using only bodyparts that actually carry geometry. When the
-        # full set does not match (a variant missing from the strips), retry
-        # while dropping the smallest bodyparts so one gap cannot sink the
-        # rest of the model.
-        base = []
-        base_idx = []
-        for t_idx, (nm_t, counts_t) in enumerate(topology):
-            pos_counts = [c for c in counts_t if c > 0]
-            if pos_counts:
-                base.append((nm_t, pos_counts))
-                base_idx.append(t_idx)
+    if vtx_data and geometry_options:
+        vtx_chain = _locate_vtx_chain_v6(
+            vtx_data,
+            [option["nummeshes"] for option in geometry_options],
+            max(1, total_verts),
+        )
 
-        def _mesh_total(entry):
-            return sum(entry[1])
+    vertices = []
+    triangles = []
 
-        attempts = []
-        if base:
-            attempts.append(list(range(len(base))))
-            order = sorted(
-                range(len(base)), key=lambda k: (_mesh_total(base[k]), k)
-            )
-            for drop in order:
-                if len(base) > 1:
-                    attempts.append([k for k in range(len(base)) if k != drop])
+    for option_index, option in enumerate(geometry_options):
+        option["vertex_start"] = len(vertices)
+        option["triangle_start"] = len(triangles)
 
-        for attempt in attempts:
-            sub = [base[k] for k in attempt]
-            located = _locate_vtx_chain(vtx_data, sub, max(1, total_verts))
-            if located:
-                vtx_chain = [None] * len(topology)
-                for pos, k in enumerate(attempt):
-                    vtx_chain[base_idx[k]] = located[pos]
-                break
+        chain = None
+        if vtx_chain and option_index < len(vtx_chain):
+            chain = vtx_chain[option_index]
 
-    # Read vertex pools for every chosen model
-    pools = {}
-    for pi, cp in enumerate(chosen_pools):
-        if cp is None:
-            continue
         recs = []
-        pool_pos = cp["pool"]
-        for vi in range(cp["numverts"]):
+        pool_pos = option["pool"]
+        for vi in range(option["numverts"]):
             o = pool_pos + vi * BETA_VERTEX_STRIDE
-            if o + 64 > len(data):
+            if o + BETA_VERTEX_STRIDE > len(data):
                 break
             w = unpack("<4f", o)
             bn = unpack("<4h", o + 16)
-            numb = unpack("<h", o + 24)[0]
-            numb = max(0, min(numb, 4))
+            numb = max(0, min(unpack("<h", o + 24)[0], 4))
             px, py, pz = unpack("<3f", o + 32)
             nx, ny, nz = unpack("<3f", o + 44)
             u_, v_ = unpack("<2f", o + 56)
@@ -1890,88 +1935,139 @@ def _parse_mdl_beta(mdl_path):
                 if 0 <= bn[k] < len(bones) and w[k] > 0.0
             ]
             recs.append(((px, py, pz), (nx, ny, nz), (u_, v_), links))
-        pools[pi] = recs
 
-    # Build geometry per bodypart using VTX strips
-    for bpi in range(numbodyparts):
-        if bpi >= len(chosen_pools):
-            continue
-        cp = chosen_pools[bpi]
-        if cp is None:
-            continue
+        if chain is not None and recs:
+            for mesh_i in range(option["nummeshes"]):
+                mh = option["mesh_table"] + mesh_i * BETA_MESH_STRIDE
+                if mh + 16 > len(data):
+                    break
 
-        nummeshes = cp["nummeshes"]
-        mesh_table = cp["mesh_table"]
-        recs = pools.get(bpi, [])
-        if not recs:
-            continue
+                mat_id = unpack("<i", mh)[0]
+                num_mesh_verts = unpack("<i", mh + 8)[0]
+                vertexoffset = unpack("<i", mh + 12)[0]
 
-        chain_bp = None
-        if vtx_chain and bpi < len(vtx_chain):
-            chain_bp = vtx_chain[bpi]
+                actual_mat_id = mat_id
+                if skin_table and 0 <= mat_id < len(skin_table):
+                    actual_mat_id = skin_table[mat_id]
 
-        for mesh_i in range(nummeshes):
-            mh = mesh_table + mesh_i * BETA_MESH_STRIDE
-            if mh + 16 > len(data):
-                break
-            mat_id = unpack("<i", mh)[0]
-            num_mesh_verts = unpack("<i", mh + 8)[0]
-            vertexoffset = unpack("<i", mh + 12)[0]
+                mat_name = "default"
+                if 0 <= actual_mat_id < len(textures):
+                    mat_name = textures[actual_mat_id]
 
-            actual_mat_id = mat_id
-            if skin_table and 0 <= mat_id < len(skin_table):
-                actual_mat_id = skin_table[mat_id]
+                decoded = _decode_vtx_mesh_groups(
+                    vtx_data,
+                    chain["mesh_array"] + mesh_i * chain["stride"],
+                    max(1, num_mesh_verts),
+                )
+                if not decoded:
+                    continue
 
-            mat_name = "default"
-            if 0 <= actual_mat_id < len(textures):
-                mat_name = textures[actual_mat_id]
-
-            decoded = None
-            if chain_bp is not None and mesh_i < chain_bp["count"]:
-                vtx_mesh_pos = chain_bp["mesh_array"] + mesh_i * chain_bp["stride"]
-                decoded = _decode_vtx_mesh_groups(vtx_data, vtx_mesh_pos, max(1, num_mesh_verts))
-
-            if not decoded:
-                continue
-
-            for mapping, tris in decoded:
-                for i0, i1, i2 in tris:
-                    local = []
-                    ok_tri = True
-                    for idx in (i0, i1, i2):
-                        if idx >= len(mapping):
-                            ok_tri = False
+                for mapping, tris in decoded:
+                    for i0, i1, i2 in tris:
+                        local = []
+                        ok_tri = True
+                        for idx in (i0, i1, i2):
+                            if idx >= len(mapping):
+                                ok_tri = False
+                                continue
+                            pool_idx = vertexoffset + mapping[idx]
+                            if not (0 <= pool_idx < len(recs)):
+                                ok_tri = False
+                                continue
+                            local.append(pool_idx)
+                        if not ok_tri or len(local) != 3:
                             continue
-                        pool_idx = vertexoffset + mapping[idx]
-                        if not (0 <= pool_idx < len(recs)):
-                            ok_tri = False
-                            continue
-                        local.append(pool_idx)
-                    if not ok_tri or len(local) != 3:
-                        continue
 
-                    smd_indices = []
-                    for pool_idx in local:
-                        pos, norm, uv, links = recs[pool_idx]
-                        parent_bone = links[0][0] if links else 0
-                        smd_idx = len(model_vertices)
-                        model_vertices.append(
-                            SmdVertex(parent_bone=parent_bone, position=pos, normal=norm, uv=uv, links=links)
+                        smd_indices = []
+                        for pool_idx in local:
+                            pos, norm, uv, links = recs[pool_idx]
+                            parent_bone = links[0][0] if links else 0
+                            smd_idx = len(vertices)
+                            vertices.append(
+                                SmdVertex(
+                                    parent_bone=parent_bone,
+                                    position=pos,
+                                    normal=norm,
+                                    uv=uv,
+                                    links=links,
+                                )
+                            )
+                            smd_indices.append(smd_idx)
+
+                        triangles.append(
+                            SmdTriangle(
+                                material=mat_name,
+                                indices=(smd_indices[0], smd_indices[1], smd_indices[2]),
+                            )
                         )
-                        smd_indices.append(smd_idx)
-                        for axis in range(3):
-                            min_bound[axis] = min(min_bound[axis], pos[axis])
-                            max_bound[axis] = max(max_bound[axis], pos[axis])
 
-                    model_triangles.append(
-                        SmdTriangle(material=mat_name, indices=(smd_indices[0], smd_indices[1], smd_indices[2]))
-                    )
-                    model_materials.add(mat_name)
+        option["vertex_end"] = len(vertices)
+        option["triangle_end"] = len(triangles)
+
+    # Compose the default selection: the first option with geometry in
+    # each bodypart, which is what the engine draws for bodygroup 0.
+    selections = []
+    model_vertices = []
+    model_triangles = []
+    model_materials = set()
+
+    for group in variant_groups:
+        group_options = group["options"]
+        if not group_options:
+            selections.append(0)
+            continue
+
+        choice = 0
+        for candidate_index, candidate in enumerate(group_options):
+            if candidate["triangle_end"] > candidate["triangle_start"]:
+                choice = candidate_index
+                break
+        selections.append(choice)
+
+        option = group_options[choice]
+        base = len(model_vertices)
+        model_vertices.extend(
+            vertices[option["vertex_start"] : option["vertex_end"]]
+        )
+        for triangle in triangles[option["triangle_start"] : option["triangle_end"]]:
+            i0, i1, i2 = triangle.indices
+            model_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(
+                        i0 - option["vertex_start"] + base,
+                        i1 - option["vertex_start"] + base,
+                        i2 - option["vertex_start"] + base,
+                    ),
+                )
+            )
+            model_materials.add(triangle.material)
 
     model = SmdModel(version=version, bones=bones, frames=[reference_frame])
     model.vertices = model_vertices
     model.triangles = model_triangles
     model.materials = model_materials
+
+    min_bound = [float("inf")] * 3
+    max_bound = [float("-inf")] * 3
+    for vertex in model_vertices:
+        for axis in range(3):
+            min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+            max_bound[axis] = max(max_bound[axis], vertex.position[axis])
+
+    model.metadata["bodygroups"] = [
+        {
+            "name": group["name"],
+            "options": [option["name"] for option in group["options"]],
+        }
+        for group in variant_groups
+    ]
+    model.metadata["bodygroup_geometry"] = variant_groups
+    model.metadata["bodygroup_selection"] = selections
+    model.metadata["bodygroup_pool"] = {
+        "vertices": vertices,
+        "triangles": triangles,
+    }
     model.uv_pre_flipped = False
     model.metadata["material_dirs"] = []
 
@@ -2213,6 +2309,7 @@ def parse_mdl(mdl_path: str) -> SmdModel:
                                 indices=(smd_indices[0], smd_indices[1], smd_indices[2]),
                             )
                         )
+                        model_materials.add(mat_name)
                         tris_here += 1
 
             dropped_total += dropped

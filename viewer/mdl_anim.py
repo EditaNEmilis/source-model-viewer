@@ -19,27 +19,27 @@ ANIM_COUNT_OFFSET = 0xB4
 ANIM_INDEX_OFFSET = 0xB8
 STUDIOHDR2_OFFSET_FIELD = 0x158
 
-# mstudioanimdesc_t (56 bytes on v44-v48 branches)
-ANIMDESC_SIZE = 56
+# mstudioanimdesc_t (100 bytes on v44-v48 branches, including the section
+# and zero-frame tail)
+ANIMDESC_SIZE = 100
 
-# Per bone animation flags (mstudioanim_t)
+# mstudioseqdesc_t (212 bytes on v44-v48 branches)
+SEQDESC_SIZE = 212
+SEQ_COUNT_OFFSET = 0xBC
+SEQ_INDEX_OFFSET = 0xC0
+ANIMDESC_ANIMBLOCK_OFFSET = 52
+ANIMDESC_ANIMINDEX_OFFSET = 56
+
+# Per bone animation flags (mstudioanim_t, Source SDK studio.h)
 STUDIO_ANIM_RAWPOS = 0x01       # vector48 half floats, absolute
-STUDIO_ANIM_RAWROT = 0x02       # quaternion64, absolute
-STUDIO_ANIM_RAWROT2 = 0x04      # quaternion48, absolute
-STUDIO_ANIM_DELTAPOS = 0x08     # 3 rle channels, added to bind position
-STUDIO_ANIM_DELTAROT = 0x10     # 3 rle channels, composed with bind rotation
-STUDIO_ANIM_ANIMBLOCK = 0x20    # bone data lives in an anim block (.ani file)
-STUDIO_ANIM_ANIMBLOCKPOS = 0x40 # position encoded inside the anim block
-STUDIO_ANIM_LOOPW = 0x80        # wrap value stored in next field
+STUDIO_ANIM_RAWROT = 0x02       # quaternion48, absolute
+STUDIO_ANIM_ANIMPOS = 0x04      # 3 value pointers, position deltas
+STUDIO_ANIM_ANIMROT = 0x08      # 3 value pointers, rotation angles
+STUDIO_ANIM_DELTA = 0x10        # values are deltas from the bind pose
+STUDIO_ANIM_RAWROT2 = 0x20      # quaternion64, absolute
 
 ROT_SCALE = (2.0 * math.pi) / 65536.0  # == pi / 32768
 POS_SCALE = 1.0 / 64.0
-
-# RLE rotation channels are stored in reverse order relative to x,y,z euler.
-CHANNELS_REVERSED = True
-
-# Delta rotations are composed as bind * delta when True, delta * bind otherwise.
-DELTA_PREMULTIPLY = False
 
 MAX_SAFE_FRAMES = 100000
 MAX_SAFE_BONES = 4096
@@ -331,27 +331,27 @@ class _BoneEntry:
 
 
 def _parse_bone_list(buf: bytes, start: int, limit_entries: int = MAX_SAFE_BONES) -> List[_BoneEntry]:
-    """Walk the contiguous mstudioanim_t header array.
+    """Walk the mstudioanim_t header chain.
 
-    Headers are 4 bytes each and sorted by bone id; the array ends at a bone
-    id of 255. Each header's compressed data sits at (header_pos + offset).
+    Each 4 byte header is {bone, flags, nextoffset}; the animation data for
+    that bone starts immediately after the header and ``nextoffset`` points
+    to the next header (zero ends the chain).
     """
     entries: List[_BoneEntry] = []
     pos = start
-    end = min(len(buf) - 4, start + limit_entries * 4)
+    end = len(buf) - 4
 
-    while pos <= end and len(entries) < limit_entries:
-        bone_id, flags, offset = struct.unpack_from("<BBh", buf, pos)
+    while 0 <= pos <= end and len(entries) < limit_entries:
+        bone_id, flags, next_offset = struct.unpack_from("<BBh", buf, pos)
 
         if bone_id >= 254:
             break
 
-        data_pos = pos + offset
-        if data_pos < 0 or data_pos >= len(buf):
-            break
+        entries.append(_BoneEntry(bone_id, flags, pos, pos + 4, buf))
 
-        entries.append(_BoneEntry(bone_id, flags, pos, data_pos, buf))
-        pos += 4
+        if next_offset <= 0:
+            break
+        pos += next_offset
 
     return entries
 
@@ -367,63 +367,49 @@ def _eval_bone(
 ) -> Optional[Tuple[Tuple[float, float, float], Quat]]:
     """Decode one bone at one frame. Returns None when data is unavailable."""
     flags = entry.flags
-
-    # Data stored in an external block: follow the pointer and re-parse there.
-    if flags & STUDIO_ANIM_ANIMBLOCK:
-        resolved = source.resolve_block(animblock)
-        if resolved is None:
-            return None
-
-        block_buf, block_base = resolved
-        (nested_offset,) = struct.unpack_from("<h", entry.buffer, entry.header_pos + 2)
-        nested = _parse_bone_list(block_buf, block_base + nested_offset)
-        if not nested:
-            return None
-        return _eval_bone(nested[0], frame, num_frames, source, animblock, bind_pos, bind_quat)
-
     buf = entry.buffer
-    pos = entry.data_pos
+    pos = entry.header_pos + 4
 
-    # Rotation group comes first in the data area.
+    # Rotation data starts immediately after the 4 byte header.
     quat: Optional[Quat] = None
     if flags & STUDIO_ANIM_RAWROT:
-        quat = _decode_quat64(buf[pos : pos + 8])
-        pos += 8
-    elif flags & STUDIO_ANIM_RAWROT2:
         quat = _decode_quat48(buf[pos : pos + 6])
         pos += 6
-    elif flags & STUDIO_ANIM_DELTAROT:
-        channels, used = _read_three_channels(buf, pos, num_frames)
-        raw = (
+    elif flags & STUDIO_ANIM_RAWROT2:
+        quat = _decode_quat64(buf[pos : pos + 8])
+        pos += 8
+    elif flags & STUDIO_ANIM_ANIMROT:
+        channels, used = _read_value_channels(buf, pos, num_frames)
+        pos += used
+        angles = [
             _sample_channel(channels[0], frame) * ROT_SCALE,
             _sample_channel(channels[1], frame) * ROT_SCALE,
             _sample_channel(channels[2], frame) * ROT_SCALE,
-        )
-        if CHANNELS_REVERSED:
-            raw = (raw[2], raw[1], raw[0])
-        delta = quat_from_euler(raw)
-        if DELTA_PREMULTIPLY:
-            quat = quat_mul(delta, bind_quat)
-        else:
-            quat = quat_mul(bind_quat, delta)
+        ]
+        if not (flags & STUDIO_ANIM_DELTA):
+            bind_euler = quat_to_euler(bind_quat)
+            angles = [angles[i] + bind_euler[i] for i in range(3)]
+        quat = quat_from_euler(tuple(angles))
 
     if quat is None:
         quat = bind_quat
 
-    # Position group follows the rotation group.
+    # Position data follows the rotation data.
     position: Optional[Tuple[float, float, float]] = None
     if flags & STUDIO_ANIM_RAWPOS:
         position = _decode_vector48(buf[pos : pos + 6])
         pos += 6
-    elif flags & STUDIO_ANIM_DELTAPOS:
-        channels, _used = _read_three_channels(buf, pos, num_frames)
-        dx = _sample_channel(channels[0], frame) * POS_SCALE
-        dy = _sample_channel(channels[1], frame) * POS_SCALE
-        dz = _sample_channel(channels[2], frame) * POS_SCALE
-        position = (bind_pos[0] + dx, bind_pos[1] + dy, bind_pos[2] + dz)
-    elif flags & STUDIO_ANIM_ANIMBLOCKPOS:
-        # Rare encoding; leave the bone on its bind position.
-        pass
+    elif flags & STUDIO_ANIM_ANIMPOS:
+        channels, used = _read_value_channels(buf, pos, num_frames)
+        pos += used
+        values = [
+            _sample_channel(channels[0], frame) * POS_SCALE,
+            _sample_channel(channels[1], frame) * POS_SCALE,
+            _sample_channel(channels[2], frame) * POS_SCALE,
+        ]
+        if not (flags & STUDIO_ANIM_DELTA):
+            values = [values[i] + bind_pos[i] for i in range(3)]
+        position = tuple(values)
 
     if position is None:
         position = bind_pos
@@ -431,21 +417,26 @@ def _eval_bone(
     return (position, quat)
 
 
-def _read_three_channels(buf: bytes, pos: int, num_frames: int):
-    """Read three consecutive RLE channels starting at pos.
+def _read_value_channels(buf: bytes, vptr_pos: int, num_frames: int):
+    """Read the three RLE channels of one mstudioanim_valueptr_t.
 
-    Channels carry no separators, so each one is sized by walking its spans
-    until they cover num_frames; the next channel starts right after.
+    The three int16 offsets are relative to the value pointer struct and
+    point at independently placed channels. Returns the channels and the
+    6 bytes the pointer itself occupies.
     """
+    if vptr_pos + 6 > len(buf):
+        return [[], [], []], 0
+
+    offsets = struct.unpack_from("<3h", buf, vptr_pos)
     channels = []
-    used = 0
-
-    for _ in range(3):
-        spans, channel_used = _read_channel(buf, pos + used, num_frames)
+    for offset in offsets:
+        if offset <= 0:
+            channels.append([])
+            continue
+        spans, _used = _read_channel(buf, vptr_pos + offset, num_frames)
         channels.append(spans)
-        used += channel_used
 
-    return channels, used
+    return channels, 6
 
 
 ### Animation description parsing ###
@@ -532,15 +523,37 @@ def read_include_model_paths(data: bytes) -> List[str]:
 
 
 def _resolve_include_path(base_mdl_path: str, include_path: str) -> Optional[str]:
-    import_path = include_path.replace("\\", "/")
-    directory = os.path.dirname(base_mdl_path)
+    import_path = include_path.replace("\\", "/").lstrip("/")
+    directory = os.path.dirname(os.path.abspath(base_mdl_path))
 
     candidates = [
         os.path.join(directory, import_path),
         os.path.join(directory, os.path.basename(import_path)),
     ]
 
+    # Standard game layout: <root>/models/.../base.mdl includes
+    # models/.../shared.mdl. Resolve against the directory that holds
+    # the models folder, then against a few parent directories.
+    parts = os.path.normpath(base_mdl_path).split(os.sep)
+    lowered = [part.lower() for part in parts]
+    if "models" in lowered:
+        models_index = len(lowered) - 1 - lowered[::-1].index("models")
+        root = os.sep.join(parts[:models_index])
+        candidates.append(os.path.join(root, *import_path.split("/")))
+
+    parent = directory
+    for _ in range(4):
+        candidates.append(os.path.join(parent, import_path))
+        parent = os.path.dirname(parent)
+        if not parent or parent == os.path.dirname(parent):
+            break
+
+    seen = set()
     for candidate in candidates:
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
         if os.path.isfile(candidate):
             return candidate
     return None
@@ -602,7 +615,6 @@ def _iter_anims(data: bytes):
         if desc_offset + ANIMDESC_SIZE > len(data):
             break
 
-        fields = struct.unpack_from("<14i", data, desc_offset)
         (
             baseptr,
             name_offset,
@@ -611,14 +623,11 @@ def _iter_anims(data: bytes):
             numframes,
             _nummovements,
             _movementindex,
-            animblock,
-            animindex,
-            _numikrules,
-            _ikruleindex,
-            _animblockikruleindex,
-            _numlocalhierarchy,
-            _localhierarchyindex,
-        ) = fields
+        ) = struct.unpack_from("<7i", data, desc_offset)
+
+        animblock, animindex = struct.unpack_from(
+            "<2i", data, desc_offset + ANIMDESC_ANIMBLOCK_OFFSET
+        )
 
         (fps,) = struct.unpack_from("<f", data, desc_offset + 8)
 
@@ -634,15 +643,101 @@ def _iter_anims(data: bytes):
         }
 
 
+def _iter_sequences(data: bytes):
+    """Yield the local sequence table entries (v44+ layout)."""
+    count, table_offset = struct.unpack_from("<2i", data, SEQ_COUNT_OFFSET)
+    count = max(0, min(int(count), 16384))
+
+    for i in range(count):
+        seq_offset = table_offset + i * SEQDESC_SIZE
+        if seq_offset < 0 or seq_offset + SEQDESC_SIZE > len(data):
+            break
+
+        _baseptr, label_offset, _activity_offset, flags = struct.unpack_from(
+            "<4i", data, seq_offset
+        )
+        numblends = struct.unpack_from("<i", data, seq_offset + 56)[0]
+        anim_index = struct.unpack_from("<i", data, seq_offset + 60)[0]
+        groupsize_x = struct.unpack_from("<i", data, seq_offset + 68)[0]
+        groupsize_y = struct.unpack_from("<i", data, seq_offset + 72)[0]
+
+        blend_count = numblends
+        if blend_count <= 0:
+            blend_count = groupsize_x * groupsize_y
+        blend_count = max(1, min(blend_count, 64))
+
+        blends = []
+        start = seq_offset + anim_index
+        if 0 <= anim_index < len(data) and start + blend_count * 2 <= len(data):
+            blends = list(struct.unpack_from(f"<{blend_count}h", data, start))
+
+        yield {
+            "index": i,
+            "offset": seq_offset,
+            "name": _read_cstring(data, seq_offset + label_offset),
+            "flags": flags,
+            "numblends": numblends,
+            "blends": blends,
+            "groupsize": (groupsize_x, groupsize_y),
+        }
+
+
+def _build_clip_from_desc(
+    desc,
+    data: bytes,
+    source,
+    bones: List[SmdBone],
+    base_transforms: Dict[int, Transform],
+    default_pos,
+    default_quat,
+) -> Optional[SmdModel]:
+    num_frames = int(desc["numframes"])
+    fps = float(desc["fps"])
+    if num_frames <= 0 or num_frames > MAX_SAFE_FRAMES or fps <= 0.0:
+        return None
+
+    animindex = desc["animindex"]
+    animblock = desc["animblock"]
+
+    if animindex != 0:
+        data_start = desc["offset"] + animindex
+        buffer = data
+    elif animblock != 0:
+        resolved = source.resolve_block(animblock)
+        if resolved is None:
+            return None
+        buffer, data_start = resolved
+    else:
+        return None
+
+    model = _build_clip(
+        buffer,
+        data_start,
+        source,
+        animblock,
+        num_frames,
+        bones,
+        base_transforms,
+        default_pos,
+        default_quat,
+    )
+
+    if model is None or not model.frames:
+        return None
+    return model
+
+
 def extract_mdl_animations(
     data: bytes,
     mdl_path: str,
     bones: Optional[List[SmdBone]] = None,
     base_transforms: Optional[Dict[int, Transform]] = None,
 ) -> List[Tuple[str, SmdModel]]:
-    """Extract local animations from Source MDL bytes (version 25+).
+    """Extract local sequence clips from Source MDL bytes (version 25+).
 
-    Returns (name, clip model) pairs compatible with renderer.set_animation_clips.
+    Sequences are preferred because that is what the engine and HLMV list.
+    A sequence with several blends uses its first blend for the clip. Models
+    without a usable sequence table fall back to the animation descriptions.
     """
     magic, version = struct.unpack_from("<2i", data, 0)
     if magic != 0x54534449 or version < 25:
@@ -661,56 +756,99 @@ def extract_mdl_animations(
     clips: List[Tuple[str, SmdModel]] = []
     used_names: set = set()
 
-    for desc in _iter_anims(data):
-        name = desc["name"] or f"anim_{len(clips)}"
-        while name in used_names:
-            name = f"{name}_dup"
-        used_names.add(name)
+    anims = list(_iter_anims(data))
+    sequences = (
+        list(_iter_sequences(data))
+        if len(data) >= SEQ_INDEX_OFFSET + 4
+        else []
+    )
 
-        num_frames = int(desc["numframes"])
-        fps = float(desc["fps"])
-        if num_frames <= 0 or num_frames > MAX_SAFE_FRAMES or fps <= 0.0:
-            continue
-
-        animindex = desc["animindex"]
-        animblock = desc["animblock"]
-
-        if animindex != 0:
-            data_start = desc["offset"] + animindex
-            buffer = data
-        elif animblock != 0:
-            resolved = source.resolve_block(animblock)
-            if resolved is None:
+    if sequences:
+        for sequence in sequences:
+            blends = sequence["blends"]
+            if not blends:
                 continue
-            buffer, data_start = resolved
-        else:
-            continue
 
-        model = _build_clip(
-            buffer,
-            data_start,
-            source,
-            animblock,
-            num_frames,
-            bones,
-            base_transforms,
-            default_pos,
-            default_quat,
-        )
+            name = sequence["name"] or f"sequence_{sequence['index']}"
+            while name in used_names:
+                name = f"{name}_dup"
 
-        if model is None or not model.frames:
-            continue
+            blend_models = []
+            first_desc = None
+            for blend_index, desc_index in enumerate(blends):
+                if not 0 <= desc_index < len(anims):
+                    continue
+                desc = anims[desc_index]
 
-        duration = num_frames / fps
-        model.metadata.update(
-            {
-                "frame_rate": fps,
-                "duration": duration,
-                "name": name,
-                "looping": bool(desc["flags"] & 0x1),
-            }
-        )
-        clips.append((name, model))
+                model = _build_clip_from_desc(
+                    desc,
+                    data,
+                    source,
+                    bones,
+                    base_transforms,
+                    default_pos,
+                    default_quat,
+                )
+                if model is None:
+                    continue
+
+                if first_desc is None:
+                    first_desc = desc
+                model.metadata.update(
+                    {
+                        "frame_rate": float(desc["fps"]),
+                        "duration": int(desc["numframes"]) / float(desc["fps"]),
+                        "blend_index": blend_index,
+                    }
+                )
+                blend_models.append({"index": blend_index, "model": model})
+
+            if not blend_models:
+                continue
+
+            used_names.add(name)
+            primary = blend_models[0]["model"]
+            primary.metadata.update(
+                {
+                    "frame_rate": float(first_desc["fps"]),
+                    "duration": int(first_desc["numframes"]) / float(first_desc["fps"]),
+                    "name": name,
+                    "looping": bool(sequence["flags"] & 0x1),
+                    "sequence_index": sequence["index"],
+                    "numblends": sequence["numblends"],
+                    "groupsize": sequence["groupsize"],
+                    "sequence_blends": blend_models,
+                }
+            )
+            clips.append((name, primary))
+    else:
+        for desc in anims:
+            name = desc["name"] or f"anim_{len(clips)}"
+            while name in used_names:
+                name = f"{name}_dup"
+
+            model = _build_clip_from_desc(
+                desc,
+                data,
+                source,
+                bones,
+                base_transforms,
+                default_pos,
+                default_quat,
+            )
+            if model is None:
+                continue
+
+            used_names.add(name)
+            model.metadata.update(
+                {
+                    "frame_rate": float(desc["fps"]),
+                    "duration": int(desc["numframes"]) / float(desc["fps"]),
+                    "name": name,
+                    "looping": bool(desc["flags"] & 0x1),
+                }
+            )
+            clips.append((name, model))
 
     return clips
 

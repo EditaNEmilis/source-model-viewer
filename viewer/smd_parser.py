@@ -486,3 +486,92 @@ def parse_smd(path: str) -> SmdModel:
     model.has_animation = bool(model.vertex_targets)
 
     return model
+
+
+def compose_bodygroup_model(model, selections):
+    """Return a model whose geometry uses one bodygroup option per group.
+
+    Parsers that support bodygroups keep every variant in
+    ``metadata["bodygroup_pool"]`` and describe the selectable groups in
+    ``metadata["bodygroup_geometry"]``. This helper rebuilds the vertex and
+    triangle lists for the requested selection while sharing bones, frames,
+    clips, targets and textures with the source model.
+    """
+    metadata = getattr(model, "metadata", None) or {}
+    groups = metadata.get("bodygroup_geometry")
+    pool = metadata.get("bodygroup_pool")
+    if not groups or not pool:
+        return model
+
+    pool_vertices = pool.get("vertices") or []
+    pool_triangles = pool.get("triangles") or []
+
+    selected = list(selections or [])
+    composed_vertices = []
+    composed_triangles = []
+    composed_materials = set()
+
+    for group_index, group in enumerate(groups):
+        options = group.get("options") or []
+        if not options:
+            while len(selected) <= group_index:
+                selected.append(0)
+            continue
+
+        choice = selected[group_index] if group_index < len(selected) else 0
+        try:
+            choice = int(choice)
+        except (TypeError, ValueError):
+            choice = 0
+        choice = max(0, min(choice, len(options) - 1))
+        while len(selected) <= group_index:
+            selected.append(0)
+        selected[group_index] = choice
+
+        option = options[choice]
+        base = len(composed_vertices)
+        composed_vertices.extend(
+            pool_vertices[option["vertex_start"] : option["vertex_end"]]
+        )
+
+        for triangle in pool_triangles[
+            option["triangle_start"] : option["triangle_end"]
+        ]:
+            i0, i1, i2 = triangle.indices
+            offset = base - option["vertex_start"]
+            composed_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(i0 + offset, i1 + offset, i2 + offset),
+                )
+            )
+            composed_materials.add(triangle.material)
+
+    composed = SmdModel(
+        version=model.version,
+        bones=model.bones,
+        frames=model.frames,
+    )
+    composed.vertex_targets = model.vertex_targets
+    composed.frame_names = model.frame_names
+    composed.has_animation = model.has_animation
+    composed.uv_pre_flipped = model.uv_pre_flipped
+    composed.embedded_textures = model.embedded_textures
+    composed.metadata = dict(metadata)
+    composed.metadata["bodygroup_selection"] = selected
+    composed.vertices = composed_vertices
+    composed.triangles = composed_triangles
+    composed.materials = composed_materials
+
+    if composed_triangles:
+        composed.has_geometry = True
+        min_bound = [math.inf, math.inf, math.inf]
+        max_bound = [-math.inf, -math.inf, -math.inf]
+        for vertex in composed_vertices:
+            for axis in range(3):
+                min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+                max_bound[axis] = max(max_bound[axis], vertex.position[axis])
+        composed.min_bound = tuple(min_bound)
+        composed.max_bound = tuple(max_bound)
+
+    return composed

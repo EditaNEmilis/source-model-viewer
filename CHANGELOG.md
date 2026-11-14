@@ -46,6 +46,52 @@ Changelog of each versions.
 - VTEX uncompressed 16/32-bit formats (`R16`, `RG1616`, `RGBA16161616`, `R16F`, `RG1616F`, `RGBA16161616F`, `R32F`, `RG3232F`, `RGB323232F`, `RGBA32323232F`) now decode; their mip byte counts were missing, so mip chains sliced at the wrong size.
 - Skybox faces were built without the forward offset, so every quad plane passed through the camera eye and rasterized to nothing. Skyboxes now render behind the grid and model.
 
+### [0.9.3]
+
+#### Added
+- Drag and drop: dropping an SMD, VTA, DMX, MDL or VMDL_C file on the window
+  loads it through the normal open path. Extra files in one drop are ignored.
+- `View > Materials...`: lists every material with its resolved VTF or VTEX
+  path, flags missing textures, and can mount a materials folder without
+  leaving the dialog.
+- GoldSrc bodygroup selectors: one dropdown per bodypart in the control panel.
+  Switching rebuilds the mesh in place and keeps the camera and the current
+  animation frame.
+- HL2 beta (v37) bodygroup selectors: every bodypart variant that carries
+  geometry is decoded and selectable.
+- Retail MDL clips now come from the sequence table, so the dropdown lists
+  sequence names (`walk_all`, `idle_subtle`) instead of raw animation names.
+  The first blend is the default.
+- A Blend selector appears for multi-blend sequences such as `walk_all` and
+  `run_all`, letting each blend direction be played without adding nine entries
+  to the clip list. Switching a blend keeps the current frame.
+
+#### Fixed
+- Retail (v44+) MDL models reported zero materials even though their meshes
+  rendered. The material set is now filled while triangles are decoded.
+- Retail MDL animation descriptions were read with the wrong struct size and
+  field offsets, and bone entries used the HL2 beta flag layout. Version 44+
+  files now use the 100 byte description, the Source 2013 flag bits, value
+  pointers for animated rotations and positions, and the linked bone entry
+  chain. The HL2 models in `viewer/temp/models/humans/group01` now expose their
+  clips with the right bone counts instead of one static bone.
+- `$includemodel` animation paths now resolve from the game's `models` root
+  and parent directories, so shared animation models are found when they sit
+  beside the model tree.
+- HL2 beta (v37) models loaded their skeleton and clips but rendered no
+  geometry. Beta VTX version 6 files use 9-byte mesh headers and a different
+  LOD layout, so the retail chain locator found nothing. A new locator matches
+  the MDL mesh counts against the VTX LOD blocks, and every bodypart variant
+  decodes into the shared bodygroup pool.
+- GoldSrc models with several variants in a bodypart rendered every variant
+  stacked together. Only the selected variant per bodypart is drawn now, and
+  the variant pools stay available for switching.
+- Switching a bodygroup no longer moves the ground grid and axes. The renderer
+  keeps the model center from the initial fit instead of recomputing it from
+  the new variant's bounds.
+- Switching a bodygroup no longer restarts the skeletal animation at frame 0.
+  The current frame is restored after the mesh rebuild.
+
 ## [0.8.0] | Source 2 update
 
 ### Added

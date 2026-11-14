@@ -1210,25 +1210,25 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
 
     vertices = []
     triangles = []
-    materials = set()
     embedded_textures = {}
     texture_flags = {}
 
-    min_bound = [math.inf] * 3
-    max_bound = [-math.inf] * 3
+    bodygroups = []
 
     for bp_i in range(numbodyparts):
         bp_offset = bodypartindex + bp_i * 76
-        _raw_bp_name, nummodels, _base, modelindex = struct.unpack_from(
+        raw_bp_name, nummodels, _base, modelindex = struct.unpack_from(
             "<64s3i", data, bp_offset
         )
+        bp_name = _read_name(raw_bp_name) or f"bodypart_{bp_i}"
+        options = []
 
         bp_tris = 0
 
         for m_i in range(nummodels):
             m_offset = modelindex + m_i * 112
             (
-                _raw_m_name,
+                raw_m_name,
                 _type,
                 _boundingradius,
                 nummesh,
@@ -1241,7 +1241,20 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
                 normindex,
             ) = struct.unpack_from("<64sif8i", data, m_offset)
 
+            m_name = _read_name(raw_m_name) or f"option_{m_i}"
+            vertex_start = len(vertices)
+            triangle_start = len(triangles)
+
             if nummesh <= 0 or numverts <= 0:
+                options.append(
+                    {
+                        "name": m_name,
+                        "vertex_start": vertex_start,
+                        "vertex_end": vertex_start,
+                        "triangle_start": triangle_start,
+                        "triangle_end": triangle_start,
+                    }
+                )
                 continue
 
             vert_bones = data[vertinfoindex : vertinfoindex + numverts]
@@ -1282,7 +1295,6 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
                 tex_name, tex_flags, tex_w, tex_h, tex_pix = texture_entries[
                     texture_id
                 ]
-                materials.add(tex_name)
 
                 if tex_name not in embedded_textures and tex_w > 0 and tex_h > 0:
                     try:
@@ -1370,10 +1382,6 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
                             )
                             smd_indices.append(smd_idx)
 
-                            for axis in range(3):
-                                min_bound[axis] = min(min_bound[axis], position[axis])
-                                max_bound[axis] = max(max_bound[axis], position[axis])
-
                         if len(smd_indices) == 3:
                             triangles.append(
                                 SmdTriangle(
@@ -1385,15 +1393,87 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
 
                 bp_tris += tris_made
 
-    model.vertices = vertices
-    model.triangles = triangles
-    model.materials = materials
+            options.append(
+                {
+                    "name": m_name,
+                    "vertex_start": vertex_start,
+                    "vertex_end": len(vertices),
+                    "triangle_start": triangle_start,
+                    "triangle_end": len(triangles),
+                }
+            )
+
+        bodygroups.append({"name": bp_name, "options": options})
+
+    # Compose the default selection: the first variant with geometry in
+    # each bodypart, which is what the engine draws for bodygroup 0.
+    selections = []
+    model_vertices = []
+    model_triangles = []
+    model_materials = set()
+
+    for group in bodygroups:
+        group_options = group["options"]
+        if not group_options:
+            selections.append(0)
+            continue
+
+        choice = 0
+        for candidate_index, candidate in enumerate(group_options):
+            if candidate["triangle_end"] > candidate["triangle_start"]:
+                choice = candidate_index
+                break
+        selections.append(choice)
+
+        option = group_options[choice]
+        base = len(model_vertices)
+        model_vertices.extend(
+            vertices[option["vertex_start"] : option["vertex_end"]]
+        )
+
+        for triangle in triangles[option["triangle_start"] : option["triangle_end"]]:
+            i0, i1, i2 = triangle.indices
+            model_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(
+                        i0 - option["vertex_start"] + base,
+                        i1 - option["vertex_start"] + base,
+                        i2 - option["vertex_start"] + base,
+                    ),
+                )
+            )
+            model_materials.add(triangle.material)
+
+    model.vertices = model_vertices
+    model.triangles = model_triangles
+    model.materials = model_materials
+    model.metadata["bodygroups"] = [
+        {
+            "name": group["name"],
+            "options": [option["name"] for option in group["options"]],
+        }
+        for group in bodygroups
+    ]
+    model.metadata["bodygroup_geometry"] = bodygroups
+    model.metadata["bodygroup_selection"] = selections
+    model.metadata["bodygroup_pool"] = {
+        "vertices": vertices,
+        "triangles": triangles,
+    }
+
     model.uv_pre_flipped = False
     model.embedded_textures = embedded_textures
     model.metadata["texture_flags"] = texture_flags
 
-    if triangles:
+    if model_triangles:
         model.has_geometry = True
+        min_bound = [math.inf, math.inf, math.inf]
+        max_bound = [-math.inf, -math.inf, -math.inf]
+        for vertex in model_vertices:
+            for axis in range(3):
+                min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+                max_bound[axis] = max(max_bound[axis], vertex.position[axis])
         model.min_bound = tuple(min_bound)
         model.max_bound = tuple(max_bound)
 
@@ -1421,3 +1501,90 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
         model.metadata["animation_error"] = str(error)
 
     return model
+
+
+def compose_goldsrc_bodygroups(model, selections):
+    """Return a model whose geometry uses one variant per bodypart.
+
+    The parser keeps every variant in ``metadata["bodygroup_pool"]`` and
+    records the selected defaults in ``metadata["bodygroup_selection"]``.
+    Switching a selector only rebuilds the vertex and triangle lists, so
+    bones, frames, clips and embedded textures are shared with the source
+    model.
+    """
+    metadata = getattr(model, "metadata", None) or {}
+    groups = metadata.get("bodygroup_geometry")
+    pool = metadata.get("bodygroup_pool")
+    if not groups or not pool:
+        return model
+
+    pool_vertices = pool.get("vertices") or []
+    pool_triangles = pool.get("triangles") or []
+
+    selected = list(selections or [])
+    composed_vertices = []
+    composed_triangles = []
+    composed_materials = set()
+
+    for group_index, group in enumerate(groups):
+        options = group.get("options") or []
+        if not options:
+            continue
+
+        choice = selected[group_index] if group_index < len(selected) else 0
+        try:
+            choice = int(choice)
+        except (TypeError, ValueError):
+            choice = 0
+        choice = max(0, min(choice, len(options) - 1))
+        while len(selected) <= group_index:
+            selected.append(0)
+        selected[group_index] = choice
+
+        option = options[choice]
+        base = len(composed_vertices)
+        composed_vertices.extend(
+            pool_vertices[option["vertex_start"] : option["vertex_end"]]
+        )
+
+        for triangle in pool_triangles[
+            option["triangle_start"] : option["triangle_end"]
+        ]:
+            i0, i1, i2 = triangle.indices
+            offset = base - option["vertex_start"]
+            composed_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(i0 + offset, i1 + offset, i2 + offset),
+                )
+            )
+            composed_materials.add(triangle.material)
+
+    composed = SmdModel(
+        version=model.version,
+        bones=model.bones,
+        frames=model.frames,
+    )
+    composed.vertex_targets = model.vertex_targets
+    composed.frame_names = model.frame_names
+    composed.has_animation = model.has_animation
+    composed.uv_pre_flipped = model.uv_pre_flipped
+    composed.embedded_textures = model.embedded_textures
+    composed.metadata = dict(metadata)
+    composed.metadata["bodygroup_selection"] = selected
+    composed.vertices = composed_vertices
+    composed.triangles = composed_triangles
+    composed.materials = composed_materials
+
+    if composed_triangles:
+        composed.has_geometry = True
+        min_bound = [math.inf, math.inf, math.inf]
+        max_bound = [-math.inf, -math.inf, -math.inf]
+        for vertex in composed_vertices:
+            for axis in range(3):
+                min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+                max_bound[axis] = max(max_bound[axis], vertex.position[axis])
+        composed.min_bound = tuple(min_bound)
+        composed.max_bound = tuple(max_bound)
+
+    return composed
