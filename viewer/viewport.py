@@ -83,6 +83,23 @@ class Viewport(QOpenGLWidget):
         self.renderer.set_driver_progress_axis(axis)
         self.update()
 
+    def set_skeletal_blend_position(self, x, y):
+        self.renderer.set_skeletal_blend_position(x, y)
+        self.update()
+
+    def skeletal_blend_position(self):
+        return self.renderer.skeletal_blend_position()
+
+    def set_root_motion(self, enabled):
+        self.renderer.set_root_motion(enabled)
+        self.update()
+
+    def root_motion_enabled(self):
+        return self.renderer.root_motion_enabled()
+
+    def root_motion_offset(self):
+        return self.renderer.root_motion_offset()
+
     def set_skeletal_frame(self, frame):
         self.renderer.set_skeletal_frame(frame)
         self.update()

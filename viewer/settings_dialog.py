@@ -209,6 +209,15 @@ class SettingsDialog(QDialog):
         )
         model_form.addRow(self.skeleton_check)
 
+        self.root_motion_check = QCheckBox("Apply sequence movement (root motion)")
+        self.root_motion_check.setChecked(
+            self.settings.value("model/root_motion", False, type=bool)
+        )
+        self.root_motion_check.setToolTip(
+            "Use the sequence movement table so walk and run cycles travel"
+        )
+        model_form.addRow(self.root_motion_check)
+
         model_layout.addWidget(model_group)
         model_layout.addStretch()
         tabs.addTab(model_tab, "Model")
@@ -307,6 +316,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue("model/view_mode", view_modes[view_index])
         self.settings.setValue("model/wireframe", self.wireframe_check.isChecked())
         self.settings.setValue("model/show_skeleton", self.skeleton_check.isChecked())
+        self.settings.setValue("model/root_motion", self.root_motion_check.isChecked())
 
         self.settings.setValue("window/theme", self.theme_combo.currentIndex())
         self.settings.setValue("window/show_controls", self.show_controls_check.isChecked())

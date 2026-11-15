@@ -1074,11 +1074,11 @@ def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
 
     if malformed_sequences:
         add_error(
-            f"{len(malformed_sequences)} sequence(s) contain malformed channels; "
-            "affected channels use the bind pose"
+            f"{len(malformed_sequences)} sequence(s) contain malformed channels. "
+            "Affected channels use the bind pose"
         )
 
-    return clips, "; ".join(errors)
+    return clips, ". ".join(errors)
 
 
 def _load_textures(texture_data: bytes, numtextures: int, textureindex: int):
@@ -1122,7 +1122,7 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
     if magic == b"IDSQ":
         raise ValueError(
             "This is an external GoldSrc animation library (IDSQ), not a "
-            "renderable model. Open the base model instead; its sequence "
+            "renderable model. Open the base model instead. Its sequence "
             "groups reference this file."
         )
     if magic != b"IDST":
@@ -1495,7 +1495,7 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
         if anim_error:
             prev = model.metadata.get("animation_error", "")
             model.metadata["animation_error"] = (
-                f"{prev}; {anim_error}" if prev else anim_error
+                f"{prev}. {anim_error}" if prev else anim_error
             )
     except Exception as error:
         model.metadata["animation_error"] = str(error)

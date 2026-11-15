@@ -14,13 +14,13 @@ Changelog of each versions.
 - Control panel rework: playback, clip and readout rows are grouped with a separator, the clip dropdown and sequence slider are wider, and a persistent model info readout shows triangles, bones, materials and clip count.
 
 ### Fixed
-- Clip info text is no longer clipped at the right edge of the control panel; it gets its own full-width readout row.
+- Clip info text is no longer clipped at the right edge of the control panel. It gets its own full-width readout row.
 - HL2 beta clips whose bones froze because per-frame int16 streams were decoded as a single held RLE value.
 - HL2 beta clips with small zero-base motion blocks that produced no bone attribution and stayed static.
 - The existing `materials/filter_mode` setting was saved but never applied.
 - Stale help dialog text for beta, Source 2 and GoldSrc.
 - Version, help, About and format docs refreshed for 0.9.0.
-- On the local samples the static clips were widespread before the fix: Alyx had 121 of 341, Antlion 7 of 69 and Assassin 1 of 17. The decoder now animates those clips instead of holding the bind pose; exact remaining counts vary per model.
+- On the local samples the static clips were widespread before the fix: Alyx had 121 of 341, Antlion 7 of 69 and Assassin 1 of 17. The decoder now animates those clips instead of holding the bind pose. Exact remaining counts vary per model.
 
 ### [0.9.1]
 
@@ -38,12 +38,12 @@ Changelog of each versions.
 #### Added
 - Headless check tooling in `viewer/tools/`: `modelcheck.py` (SMD/VTA/MDL/VMDL_C/DMX sanity checks), `texturecheck.py` (VTF/VTEX), `materialcheck.py` (VMT/VMAT_C) and `run_testfiles.py` (smoke test over the bundled test files). They reuse the viewer parsers without importing the GUI, and support `-r`, `-q`, `--strict` and `--json`.
 - Application icons wired in from `viewer/assets/icos/`: colored and black silhouette sets with 32/64px variants, applied to the app and main window and refreshed when the dialog theme changes.
-- Viewport skyboxes from `viewer/assets/skybox/`: each subfolder is one skybox, either a six-face cubemap set (VTF or common image files, with or without an underscore before the face suffix) or a single panorama image converted to cube faces. Settings Viewport tab picks the skybox with live preview behind the dialog, defaulting to the first discovered skybox; no skybox keeps the solid background color. A bundled `sky_day01` cubemap ships with the app, and the face axis mapping was verified by exact shared-edge matching between adjacent faces.
+- Viewport skyboxes from `viewer/assets/skybox/`: each subfolder is one skybox, either a six-face cubemap set (VTF or common image files, with or without an underscore before the face suffix) or a single panorama image converted to cube faces. Settings Viewport tab picks the skybox with live preview behind the dialog, defaulting to the first discovered skybox. No skybox keeps the solid background color. A bundled `sky_day01` cubemap ships with the app, and the face axis mapping was verified by exact shared-edge matching between adjacent faces.
 
 #### Fixed
 - VTF `UVWQ8888` and `UVLX8888` were sized as 8 bytes per pixel instead of 4, so those files failed with an image data overrun error.
 - VTF `RGBA16161616` / `RGBA16161616F` and the float formats `R32F`, `RGB323232F` and `RGBA32323232F` had byte counts but no decoders and now decode to RGBA.
-- VTEX uncompressed 16/32-bit formats (`R16`, `RG1616`, `RGBA16161616`, `R16F`, `RG1616F`, `RGBA16161616F`, `R32F`, `RG3232F`, `RGB323232F`, `RGBA32323232F`) now decode; their mip byte counts were missing, so mip chains sliced at the wrong size.
+- VTEX uncompressed 16/32-bit formats (`R16`, `RG1616`, `RGBA16161616`, `R16F`, `RG1616F`, `RGBA16161616F`, `R32F`, `RG3232F`, `RGB323232F`, `RGBA32323232F`) now decode. Their mip byte counts were missing, so mip chains sliced at the wrong size.
 - Skybox faces were built without the forward offset, so every quad plane passed through the camera eye and rasterized to nothing. Skyboxes now render behind the grid and model.
 
 ### [0.9.3]
@@ -92,10 +92,52 @@ Changelog of each versions.
 - Switching a bodygroup no longer restarts the skeletal animation at frame 0.
   The current frame is restored after the mesh rebuild.
 
+### [0.9.4]
+
+#### Added
+- True multi-blend interpolation for retail MDL sequences. Sequences with a
+  `groupsize` grid now expose one pose parameter slider per active axis, and
+  the renderer bilinearly blends the surrounding blend cells instead of
+  snapping to a single direction. This covers 1D direction grids such as
+  `walk_all` (9x1) and 2D grids such as `Aim_all` (3x3).
+- Pose parameter sliders use the model's `mstudioposeparamdesc_t` names,
+  ranges and direction, so `move_yaw` runs -180..180 and `aim_pitch` uses
+  the values baked into the sequence.
+- `View > Root Motion` and a Settings Model option: walk and run cycles now
+  travel using the sequence movement table (`mstudiomovement_t`). The frame
+  label reports the current travel distance, and the offset follows the
+  active blend weights.
+- Retail MDL bodygroups: every bodypart model variant is decoded into the
+  shared bodygroup pool, so HL2 models with alternate hands, weapons,
+  briefcases, propellers and similar parts can switch variants.
+- `View > Bodygroups...`: one selector per bodypart, live preview, and a
+  reset to the model's default selection. The old bottom control-panel row
+  is gone.
+
+#### Fixed
+- Demand-loaded animation blocks were read from the wrong base. Version 44+
+  headers store `numanimblocks` / `animblockindex` at 0x160/0x164 and the
+  table is an array of 8 byte `mstudioanimblock_t` entries. The old lookup
+  searched `studiohdr2_t` and indexed it as 4 byte offsets. Clips whose
+  animation lived in an `.ani` block now decode the real per-bone tracks.
+- `animindex` for an animation in a demand-loaded block is relative to the
+  block start, not the animation description. Pelvis and other position
+  tracks from such blocks previously read unrelated MDL bytes.
+- Quaternion64 and Quaternion48 rotation tracks used the wrong component bit
+  widths. They now match `compressed_vector.h` (21/21/21 and 16/16/15 bits
+  plus the sign bit), fixing collapsed, over-rotated HL2 poses.
+- RLE rotation and position tracks are decoded with each bone's
+  `rotscale` / `posscale` from `mstudiobone_t` instead of fixed
+  `2*pi/65536` and `1/64` constants.
+- The pose parameter table is read from the local header, so sequence
+  `paramindex` entries resolve to their real names and ranges.
+- Bodygroup swaps keep the current clip and frame, including on models whose
+  skeleton is rebuilt for the new variant.
+
 ## [0.8.0] | Source 2 update
 
 ### Added
-- `.vtex_c` import: texture header, extra-data table and full mip chain, including LZ4-compressed mips. DXT1, DXT5, BC4, BC5 and BC7 upload as compressed GL textures; RGBA8888, BGRA8888, I8, IA88, A8 and R8 decode to RGBA.
+- `.vtex_c` import: texture header, extra-data table and full mip chain, including LZ4-compressed mips. DXT1, DXT5, BC4, BC5 and BC7 upload as compressed GL textures. RGBA8888, BGRA8888, I8, IA88, A8 and R8 decode to RGBA.
 - `.vmat_c` import: shader name and parameter arrays, so each Source 2 draw call resolves its base color map through `g_tColor` / `TextureColor`.
 - VMDL draws record their full material resource paths, and the renderer resolves `.vmat_c` then `.vtex_c` from the mounted materials folder.
 - VMDL vertex layouts are read from the MBUF attribute table (format and offset per attribute), so half-float TEXCOORD streams decode correctly.
@@ -103,7 +145,7 @@ Changelog of each versions.
 - VTEX clamp flags now drive texture wrap modes, so UVs that leave 0..1 wrap instead of clamping.
 
 ### Fixed
-- KV3 v1 decoding now handles both string-table placements found in compiled resources; VMAT payloads previously failed with an unsupported node type.
+- KV3 v1 decoding now handles both string-table placements found in compiled resources. VMAT payloads previously failed with an unsupported node type.
 - Resource block offsets are resolved from the offset field address instead of the block table start.
 - LZ4 block decompression copies literals and matches in slices instead of byte loops.
 - Source 2 materials no longer inherit Source 1 alpha test and blending, which discarded or washed out surfaces whose alpha channel is a mask. Opaque Source 2 materials also leave the framebuffer alpha untouched.
@@ -198,10 +240,10 @@ Changelog of each versions.
   the VTF and embedded texture paths.
 
 #### Notes
-- Chrome (sphere map) textures sample flat; runtime sphere-mapped
+- Chrome (sphere map) textures sample flat. Runtime sphere-mapped
   coordinates are not computed.
 - Sequence animation data (compressed animvalues) is not loaded yet
-  for retail GoldSrc models; those show their bind pose. HL1 alpha
+  for retail GoldSrc models. Those show their bind pose. HL1 alpha
   sequences and Source skeletal clips already load as playable clips.
 
 ### [0.6.3]
@@ -229,12 +271,12 @@ Changelog of each versions.
   candidate chains against the MDL topology, trying relative and absolute
   offset variants at every level of the bodypart/model/LOD hierarchy.
 - VVD vertex pools built from interleaved fixup tables came out truncated.
-  Newer compilers emit fixup runs of every LOD in file order; when those runs
+  Newer compilers emit fixup runs of every LOD in file order. When those runs
   cover the LOD vertex count the pool is rebuilt by concatenating them in
   file order, otherwise vertices fall back to original pool order. Fixes
   missing body geometry on such models.
 - Multi-bodygroup models derailed VTX chain discovery when a bodypart variant
-  slot contained no geometry; empty variants are now skipped while locating
+  slot contained no geometry. Empty variants are now skipped while locating
   the strip chain.
 - Strip group vertex ids are decoded through version-aware record layouts
   (9 bytes with id at +4 on current files, 15 bytes with id at +12 on beta
@@ -257,7 +299,7 @@ Changelog of each versions.
   draw-call reader plus MBUF (VBIB-layout) vertex/index buffers.
   `.vmdl_c` files open in the GUI with positions, normals, UVs and
   material names. Blend weights and the real skeleton still open
-  (single dummy root bone for now); files whose MDAT tail is
+  (single dummy root bone for now). Files whose MDAT tail is
   truncated load their complete draw calls with a status-bar note.
 - HL1 alpha sequence animation: every sequence decodes its per-bone
   position/rotation tracks into playable clips (fps, looping flag,
@@ -266,9 +308,9 @@ Changelog of each versions.
 #### Fixed
 - Half-Life 1 alpha sequence table: the bone-track base is the +92
   `animindex` pointer, not the +44 `eventindex`. Sequences with events
-  or pivots (polyrobo walk: 4 events + 4 pivots, dance: 24 events;
+  or pivots (polyrobo walk: 4 events + 4 pivots, dance: 24 events,
   barney shootgun: 1 event) previously decoded event bytes as bone
-  headers and froze at the bind pose. Walk and shootgun now animate;
+  headers and froze at the bind pose. Walk and shootgun now animate.
   sparse rot tracks sample by frame number instead of record index.
 - Half-Life 1 alpha skeletons: bind positions and rotations are now
   read from the first sequence's track block (float pos quads,
@@ -282,12 +324,12 @@ Changelog of each versions.
 
 #### Changed
 - Completely removed runtime recursive filesystem scanning in texture resolution to eliminate loading freezes.
-- File open dialog now accepts `.mdl` and `.vmdl_c` alongside `.smd`, `.vta`, and `.dmx`; compiled Source 1 and Source 2 models share one display path (materials mount, clip dropdown, status-bar report with animation errors and partial-tail notes).
+- File open dialog now accepts `.mdl` and `.vmdl_c` alongside `.smd`, `.vta`, and `.dmx`. Compiled Source 1 and Source 2 models share one display path (materials mount, clip dropdown, status-bar report with animation errors and partial-tail notes).
 - Alpha channel masking: textures with Phong specular masks are rendered opaque unless `$translucent` or `$alphatest` is explicitly enabled.
 - Help dialogs updated with MDL pipeline details, Settings documentation, and 0.6.4 version info (alpha/beta/Source 2 coverage, clip playback).
 
 #### Fixed
-- `parse_mdl` now rejects Source 2 containers (`MRPH`) and GoldSrc animation libraries (`IDSQ`) with actionable messages instead of generic parse errors; `is_mdl_file`/`is_vmdl_c_file` route each kind to the right loader.
+- `parse_mdl` now rejects Source 2 containers (`MRPH`) and GoldSrc animation libraries (`IDSQ`) with actionable messages instead of generic parse errors. `is_mdl_file`/`is_vmdl_c_file` route each kind to the right loader.
 - Stacking sub-models: bodyparts now pick visible meshes rather than rendering all alternate options on top of each other.
 - VTX `MeshHeader_t` struct stride aligned to 12 bytes to prevent index and material corruption across multi-mesh models.
 - Prevented double `materials/materials/` path nesting when resolving VMT relative texture paths.

@@ -447,27 +447,91 @@ def _locate_vtx_chain(vtx_data: bytes, mdl_topology, vert_limit: int):
     """Find the VTX bodypart/model/lod chain without relying on one fixed
     header layout, validating candidates against MDL topology.
 
-    Branches differ in header size and even in whether offsets are stored
-    relative to their struct or absolute to the file, so both variants are
-    tried at every level. Candidate chains are scored and the best fully
-    consistent one wins; the lod entry must declare exactly a mesh count
-    that exists on the MDL side of its bodypart.
+    Every bodypart variant is located, not only the first model, so retail
+    MDL bodygroups can swap between fully decoded options. Branches differ
+    in header size and even in whether offsets are stored relative to their
+    struct or absolute to the file, so both variants are tried at every
+    level. Candidate chains are scored and the best fully consistent one
+    wins.
 
-    Returns a list of per bodypart dicts with the lod0 mesh array position
-    and mesh stride, or None when no consistent chain exists.
+    Returns a list of per bodypart dicts with a ``models`` list of LOD0 mesh
+    array entries, or None when no consistent chain exists.
     """
     n = len(vtx_data)
     scan_end = min(n - 16, 8192)
 
     def resolve(pos, value):
-        """Candidate targets for an offset field: relative or absolute."""
+        """Candidate targets for an offset field: relative then absolute."""
         out = []
-        if 0 < value <= 1000000:
-            out.append(value)
         rel = pos + value
-        if 0 < rel < n and rel != value:
+        if 0 < rel < n:
             out.append(rel)
+        if 0 < value <= 1000000 and value != rel:
+            out.append(value)
         return out
+
+    def locate_model(model_pos, expected_meshes):
+        if expected_meshes <= 0:
+            if model_pos + 8 <= n:
+                return {"empty": True}, 0
+            return None
+
+        if model_pos + 8 > n:
+            return None
+
+        num_lods, lod_offset = struct.unpack_from("<2i", vtx_data, model_pos)
+        if num_lods <= 0 or lod_offset <= 0:
+            return None
+
+        for lod_pos in resolve(model_pos, lod_offset):
+            if lod_pos + 12 > n:
+                continue
+
+            num_meshes, mesh_array_offset, _switch_point = struct.unpack_from(
+                "<2if", vtx_data, lod_pos
+            )
+            if num_meshes != expected_meshes:
+                continue
+
+            for mesh_array in resolve(lod_pos, mesh_array_offset):
+                if mesh_array <= 0 or mesh_array >= n:
+                    continue
+
+                stride_hits = {}
+                probe_count = min(num_meshes, 8)
+
+                for stride in (9, 12, 16, 20, 24):
+                    hits = 0
+                    for mi in range(probe_count):
+                        mp = mesh_array + mi * stride
+                        if mp + 8 > n:
+                            continue
+                        nsg = struct.unpack_from("<i", vtx_data, mp)[0]
+                        if not (0 < nsg <= 256):
+                            continue
+                        goff = struct.unpack_from("<i", vtx_data, mp + 4)[0]
+                        if not (0 < goff < 2000000):
+                            continue
+                        if _valid_vtx_group(vtx_data, mp + goff, vert_limit):
+                            hits += 1
+                    if hits:
+                        stride_hits[stride] = hits
+
+                if not stride_hits:
+                    continue
+
+                stride, hits = max(stride_hits.items(), key=lambda kv: kv[1])
+                if hits < max(1, probe_count // 2):
+                    continue
+
+                entry = {
+                    "mesh_array": mesh_array,
+                    "stride": stride,
+                    "count": num_meshes,
+                }
+                return entry, hits
+
+        return None
 
     def resolve_bodypart(bp_pos, nummodels, mesh_counts):
         if bp_pos + 8 > n:
@@ -477,61 +541,25 @@ def _locate_vtx_chain(vtx_data: bytes, mdl_topology, vert_limit: int):
         if bp_nummodels != nummodels:
             return None
 
-        for model_pos in resolve(bp_pos, bp_model_offset):
-            if model_pos + 8 > n:
+        for model_table in resolve(bp_pos, bp_model_offset):
+            if model_table + nummodels * 8 > n:
                 continue
 
-            lod_offset = struct.unpack_from("<i", vtx_data, model_pos + 4)[0]
-            if lod_offset <= 0:
-                continue
+            entries = []
+            total_hits = 0
+            ok = True
 
-            for lod_pos in resolve(model_pos, lod_offset):
-                if lod_pos + 12 > n:
-                    continue
+            for model_index, expected_meshes in enumerate(mesh_counts):
+                result = locate_model(model_table + model_index * 8, expected_meshes)
+                if result is None:
+                    ok = False
+                    break
+                entry, hits = result
+                entries.append(entry)
+                total_hits += hits
 
-                num_meshes, mesh_array_offset, _switch_point = struct.unpack_from(
-                    "<2if", vtx_data, lod_pos
-                )
-                if num_meshes not in mesh_counts:
-                    continue
-
-                for mesh_array in resolve(lod_pos, mesh_array_offset):
-                    if mesh_array <= 0 or mesh_array >= n:
-                        continue
-
-                    stride_hits = {}
-                    probe_count = min(num_meshes, 8)
-                    for stride in (9, 12, 16, 20, 24):
-                        hits = 0
-                        for mi in range(probe_count):
-                            mp = mesh_array + mi * stride
-                            if mp + 8 > n:
-                                continue
-                            nsg = struct.unpack_from("<i", vtx_data, mp)[0]
-                            if not (0 < nsg <= 256):
-                                continue
-                            goff = struct.unpack_from("<i", vtx_data, mp + 4)[0]
-                            if not (0 < goff < 2000000):
-                                continue
-                            if _valid_vtx_group(vtx_data, mp + goff, vert_limit):
-                                hits += 1
-                        if hits:
-                            stride_hits[stride] = hits
-
-                    if not stride_hits:
-                        continue
-
-                    stride, hits = max(stride_hits.items(), key=lambda kv: kv[1])
-                    if hits < max(1, probe_count // 2):
-                        continue
-
-                    entry = {
-                        "mesh_array": mesh_array,
-                        "stride": stride,
-                        "count": num_meshes,
-                    }
-                    score = 100 + hits * 10 + (25 if num_meshes == max(mesh_counts) else 0)
-                    return entry, score
+            if ok:
+                return {"models": entries}, total_hits
 
         return None
 
@@ -550,7 +578,7 @@ def _locate_vtx_chain(vtx_data: bytes, mdl_topology, vert_limit: int):
                 break
             entry, part_score = result
             chain.append(entry)
-            score += part_score
+            score += 100 + part_score
 
         if ok and score > best_score:
             best_score = score
@@ -2104,14 +2132,14 @@ def parse_mdl(mdl_path: str) -> SmdModel:
         raise MdlParseError(
             "Not a Source 1 MDL file: this is a Source 2 compiled resource "
             "(.vmdl_c-style container with MRPH/MDAT/MBUF blocks). "
-            "Only .vmdl_c model files are supported; use a Source 1 "
+            "Only .vmdl_c model files are supported. Use a Source 1 "
             "MDL/SMD/DMX file instead."
         )
 
     if len(data) >= 4 and data[:4] == b"IDSQ":
         raise MdlParseError(
             "This is an external GoldSrc animation library (IDSQ), not a "
-            "renderable model. Open the base model instead; its sequence "
+            "renderable model. Open the base model instead. Its sequence "
             "groups reference this file."
         )
 
@@ -2191,6 +2219,7 @@ def parse_mdl(mdl_path: str) -> SmdModel:
 
     # Geometry construction (MDL topology first; the VTX chain is found by validation)
     bodypart_count, bodypart_offset = struct.unpack_from("<2i", data, 0xE8)
+    bodypart_count = max(0, min(int(bodypart_count), 256))
 
     mdl_topology = []
     for bp_i in range(bodypart_count):
@@ -2216,103 +2245,190 @@ def parse_mdl(mdl_path: str) -> SmdModel:
 
     dropped_total = 0
 
+    vertices = []
+    triangles = []
+    variant_groups = []
+
     for bp_i in range(bodypart_count):
         bp_offset = bodypart_offset + bp_i * 16
-        _, nummodels, _, modelindex = struct.unpack_from("<4i", data, bp_offset)
-
-        available_models = nummodels
-        if available_models <= 0:
-            continue
-
-        variant_meshes = mdl_topology[bp_i][1]
-
-        chosen_model_idx = 0
-        for test_idx, count in enumerate(variant_meshes):
-            if count > 0:
-                chosen_model_idx = test_idx
-                break
-
-        m_i = chosen_model_idx
-        m_offset = bp_offset + modelindex + m_i * 148
-        _, _, nummeshes, meshindex, _, vertexindex = struct.unpack_from(
-            "<ifi3i", data, m_offset + 64
+        name_offset, nummodels, _, modelindex = struct.unpack_from(
+            "<4i", data, bp_offset
+        )
+        nummodels = max(0, min(int(nummodels), 128))
+        group_name = (
+            _read_cstring(data, bp_offset + name_offset)
+            or f"bodypart_{bp_i}"
         )
 
+        options = []
         chain_bp = None
         if vtx_chain and bp_i < len(vtx_chain):
             chain_bp = vtx_chain[bp_i]
 
-        for mesh_i in range(nummeshes):
-            mesh_offset = m_offset + meshindex + mesh_i * 116
-            mat_id, _, _, vertexoffset = struct.unpack_from("<4i", data, mesh_offset)
+        for m_i in range(max(0, nummodels)):
+            m_offset = bp_offset + modelindex + m_i * 148
 
-            actual_mat_id = mat_id
-            if skin_table and 0 <= mat_id < len(skin_table):
-                actual_mat_id = skin_table[mat_id]
+            raw_name = data[m_offset : m_offset + 64].split(b"\x00", 1)[0]
+            option_name = raw_name.decode("latin-1", errors="ignore").strip()
+            option_name = os.path.splitext(option_name)[0]
+            if not option_name:
+                option_name = "None"
 
-            mat_name = "default"
-            if 0 <= actual_mat_id < len(textures):
-                mat_name = textures[actual_mat_id]
+            _, _, nummeshes, meshindex, _, vertexindex = struct.unpack_from(
+                "<ifi3i", data, m_offset + 64
+            )
 
-            tris_here = 0
-            dropped = 0
+            option = {
+                "name": option_name,
+                "vertex_start": len(vertices),
+                "triangle_start": len(triangles),
+            }
 
-            decoded = None
-            if chain_bp is not None and mesh_i < chain_bp["count"]:
-                vtx_mesh_pos = chain_bp["mesh_array"] + mesh_i * chain_bp["stride"]
-                decoded = _decode_vtx_mesh_groups(vtx_data, vtx_mesh_pos, max(1, len(vvd_vertices)))
+            chain_model = None
+            if chain_bp and m_i < len(chain_bp["models"]):
+                chain_model = chain_bp["models"][m_i]
 
-            if decoded:
-                for mapping, tris in decoded:
-                    for i0, i1, i2 in tris:
-                        vvd_local = []
-                        ok_tri = True
-                        for idx in (i0, i1, i2):
-                            if idx >= len(mapping):
-                                ok_tri = False
-                                dropped += 1
-                                continue
-                            orig_id = mapping[idx]
-                            vvd_idx = vertexindex // 48 + vertexoffset + orig_id
-                            if 0 <= vvd_idx < len(vvd_vertices):
+            if (
+                chain_model is not None
+                and not chain_model.get("empty")
+                and nummeshes > 0
+            ):
+                for mesh_i in range(nummeshes):
+                    mesh_offset = m_offset + meshindex + mesh_i * 116
+                    mat_id, _, _, vertexoffset = struct.unpack_from(
+                        "<4i", data, mesh_offset
+                    )
+
+                    actual_mat_id = mat_id
+                    if skin_table and 0 <= mat_id < len(skin_table):
+                        actual_mat_id = skin_table[mat_id]
+
+                    mat_name = "default"
+                    if 0 <= actual_mat_id < len(textures):
+                        mat_name = textures[actual_mat_id]
+
+                    if mesh_i >= chain_model.get("count", 0):
+                        continue
+
+                    vtx_mesh_pos = (
+                        chain_model["mesh_array"] + mesh_i * chain_model["stride"]
+                    )
+                    decoded = _decode_vtx_mesh_groups(
+                        vtx_data, vtx_mesh_pos, max(1, len(vvd_vertices))
+                    )
+                    if not decoded:
+                        continue
+
+                    for mapping, tris in decoded:
+                        for i0, i1, i2 in tris:
+                            vvd_local = []
+                            ok_tri = True
+
+                            for idx in (i0, i1, i2):
+                                if idx >= len(mapping):
+                                    ok_tri = False
+                                    break
+                                vvd_idx = (
+                                    vertexindex // 48 + vertexoffset + mapping[idx]
+                                )
+                                if not 0 <= vvd_idx < len(vvd_vertices):
+                                    ok_tri = False
+                                    break
                                 vvd_local.append(vvd_idx)
-                            else:
-                                ok_tri = False
-                                dropped += 1
-                        if not ok_tri or len(vvd_local) != 3:
-                            continue
 
-                        smd_indices = []
-                        for vvd_idx in vvd_local:
-                            pos, norm, uv, links = vvd_vertices[vvd_idx]
-                            parent_bone = links[0][0] if links else 0
-                            smd_idx = len(model_vertices)
+                            if not ok_tri or len(vvd_local) != 3:
+                                dropped_total += 1
+                                continue
 
-                            model_vertices.append(
-                                SmdVertex(
-                                    parent_bone=parent_bone,
-                                    position=pos,
-                                    normal=norm,
-                                    uv=uv,
-                                    links=links,
+                            smd_indices = []
+                            for vvd_idx in vvd_local:
+                                pos, norm, uv, links = vvd_vertices[vvd_idx]
+                                parent_bone = links[0][0] if links else 0
+                                smd_idx = len(vertices)
+
+                                vertices.append(
+                                    SmdVertex(
+                                        parent_bone=parent_bone,
+                                        position=pos,
+                                        normal=norm,
+                                        uv=uv,
+                                        links=links,
+                                    )
+                                )
+                                smd_indices.append(smd_idx)
+
+                            triangles.append(
+                                SmdTriangle(
+                                    material=mat_name,
+                                    indices=(
+                                        smd_indices[0],
+                                        smd_indices[1],
+                                        smd_indices[2],
+                                    ),
                                 )
                             )
-                            smd_indices.append(smd_idx)
 
-                            for axis in range(3):
-                                min_bound[axis] = min(min_bound[axis], pos[axis])
-                                max_bound[axis] = max(max_bound[axis], pos[axis])
+            option["vertex_end"] = len(vertices)
+            option["triangle_end"] = len(triangles)
+            options.append(option)
 
-                        model_triangles.append(
-                            SmdTriangle(
-                                material=mat_name,
-                                indices=(smd_indices[0], smd_indices[1], smd_indices[2]),
-                            )
-                        )
-                        model_materials.add(mat_name)
-                        tris_here += 1
+        variant_groups.append({"name": group_name, "options": options})
 
-            dropped_total += dropped
+    # Compose the default selection: the first option with geometry in
+    # each bodypart, which is what the engine draws for bodygroup 0.
+    selections = []
+
+    for group in variant_groups:
+        group_options = group["options"]
+        if not group_options:
+            selections.append(0)
+            continue
+
+        choice = 0
+        for candidate_index, candidate in enumerate(group_options):
+            if candidate["triangle_end"] > candidate["triangle_start"]:
+                choice = candidate_index
+                break
+        selections.append(choice)
+
+        option = group_options[choice]
+        base = len(model_vertices)
+        model_vertices.extend(
+            vertices[option["vertex_start"] : option["vertex_end"]]
+        )
+
+        for triangle in triangles[option["triangle_start"] : option["triangle_end"]]:
+            i0, i1, i2 = triangle.indices
+            model_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(
+                        i0 - option["vertex_start"] + base,
+                        i1 - option["vertex_start"] + base,
+                        i2 - option["vertex_start"] + base,
+                    ),
+                )
+            )
+            model_materials.add(triangle.material)
+
+    model.metadata["bodygroups"] = [
+        {
+            "name": group["name"],
+            "options": [option["name"] for option in group["options"]],
+        }
+        for group in variant_groups
+    ]
+    model.metadata["bodygroup_geometry"] = variant_groups
+    model.metadata["bodygroup_selection"] = selections
+    model.metadata["bodygroup_pool"] = {
+        "vertices": vertices,
+        "triangles": triangles,
+    }
+
+    for vertex in model_vertices:
+        for axis in range(3):
+            min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+            max_bound[axis] = max(max_bound[axis], vertex.position[axis])
 
     model.vertices = model_vertices
     model.triangles = model_triangles

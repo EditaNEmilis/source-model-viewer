@@ -1,4 +1,5 @@
 import colorsys
+import math
 import os
 import sys
 import zlib
@@ -132,7 +133,12 @@ from OpenGL.GLU import gluPerspective
 from viewer.camera import Camera
 from viewer.mesh_buffers import MeshBuffers
 from viewer.pose import VertexAnimator
-from viewer.skeleton import SkeletonRig, SkeletalAnimation, evaluate_world_matrices
+from viewer.skeleton import (
+    BlendedSkeletalAnimation,
+    SkeletonRig,
+    SkeletalAnimation,
+    evaluate_world_matrices,
+)
 from viewer.skinning import Skinning
 from viewer.vmat_parser import (
     VmatError,
@@ -243,6 +249,38 @@ _MODEL_UNIFORMS = (
 )
 
 
+def _sample_movement(movements, frame):
+    """Displacement and yaw at a frame from mstudiomovement_t blocks."""
+    if not movements:
+        return (0.0, 0.0, 0.0), 0.0
+
+    position = [0.0, 0.0, 0.0]
+    angle = 0.0
+    start = 0.0
+
+    for movement in movements:
+        end = float(movement.get("endframe", 0) or 0)
+        span = max(1.0, end - start)
+
+        if frame >= end:
+            amount = 1.0
+        else:
+            amount = max(0.0, min(1.0, (float(frame) - start) / span))
+
+        offset = movement.get("position") or (0.0, 0.0, 0.0)
+        position[0] += offset[0] * amount
+        position[1] += offset[1] * amount
+        position[2] += offset[2] * amount
+        angle += float(movement.get("angle", 0.0) or 0.0) * amount
+
+        if frame < end:
+            break
+
+        start = end
+
+    return (position[0], position[1], position[2]), angle
+
+
 def _vtex_wrap_modes(flags):
     """Map VTexFlags clamp suggestions to GL wrap modes."""
     wrap_s = GL_CLAMP_TO_EDGE if flags & 0x1 else GL_REPEAT
@@ -321,6 +359,15 @@ class Renderer:
         self.driver_progress_axis_override = None
         self.driver_progress_axis_value = "y"
         self.proximity_skin = False
+
+        self._blend_cells = []
+        self._blend_groupsize = (1, 1)
+        self._blend_position = (0.5, 0.5)
+        self._blend_weights = []
+        self._cell_animation_cache = {}
+        self._root_motion_enabled = False
+        self._root_motion_offset = (0.0, 0.0, 0.0)
+        self.root_motion_angle = 0.0
 
         self._animation_clips = []
         self._current_clip_index = -1
@@ -599,6 +646,7 @@ class Renderer:
             self.rig = SkeletonRig(model.bones, reference_transforms)
             vertex_weights = self._build_vertex_weights(model)
             self.skinning.set_rig(self.rig, vertex_weights)
+            self._cell_animation_cache = {}
 
         self.rebuild_animation_frames()
         self._rebuild_skeletal()
@@ -1235,8 +1283,39 @@ class Renderer:
     def set_skeletal_animation_model(self, model, preserve_frame=False):
         frame = self.skinning.frame if preserve_frame else 0.0
         self.skeletal_animation_source = model
+
+        metadata = (getattr(model, "metadata", None) or {}) if model else {}
+        self._blend_cells = list(metadata.get("blend_cells") or [])
+        self._blend_groupsize = tuple(metadata.get("groupsize") or (1, 1))
+        self._blend_position = (0.5, 0.5)
+        self._cell_animation_cache = {}
+
         self._rebuild_skeletal()
         self.set_skeletal_frame(frame)
+
+    def set_skeletal_blend_position(self, x, y):
+        self._blend_position = (
+            max(0.0, min(1.0, float(x))),
+            max(0.0, min(1.0, float(y))),
+        )
+        if self.skeletal_animation_source is None:
+            return
+        frame = self.skinning.frame
+        self._rebuild_skeletal()
+        self.set_skeletal_frame(frame)
+
+    def skeletal_blend_position(self):
+        return self._blend_position
+
+    def set_root_motion(self, enabled):
+        self._root_motion_enabled = bool(enabled)
+        self._update_root_motion()
+
+    def root_motion_enabled(self):
+        return self._root_motion_enabled
+
+    def root_motion_offset(self):
+        return self._root_motion_offset
 
     def clear_skeletal_animation(self):
         self.skeletal_animation_source = None
@@ -1247,6 +1326,11 @@ class Renderer:
         self.driver_enabled_value = False
         self.driver_bone_ref_id = -1
         self.driver_track_id = -1
+        self._blend_cells = []
+        self._blend_weights = []
+        self._cell_animation_cache = {}
+        self._root_motion_offset = (0.0, 0.0, 0.0)
+        self.root_motion_angle = 0.0
         self._refresh_pose()
 
     def set_skeletal_enabled(self, enabled):
@@ -1256,6 +1340,7 @@ class Renderer:
             and self.rig is not None
         )
         self.skinning.set_frame(self.skinning.frame)
+        self._update_root_motion()
         self._refresh_pose()
 
     def set_driver_enabled(self, enabled):
@@ -1469,6 +1554,7 @@ class Renderer:
                     progress_value = driver_position[1]
                 self.animator.set_progress(progress_value)
         self.skinning.set_frame(frame)
+        self._update_root_motion()
         self._refresh_pose()
 
     def driver_bone_name(self):
@@ -1651,24 +1737,160 @@ class Renderer:
         self.skeletal_animation = None
         self.driver_bone_ref_id = -1
         self.driver_track_id = -1
-        if (
-            self.skeletal_animation_source is not None
-            and self.rig is not None
-            and self.skeletal_animation_source.frames
-        ):
-            self.skeletal_animation = SkeletalAnimation(
-                self.skeletal_animation_source,
-                self.rig,
-            )
-            self._refresh_driver_bone()
-            self.skinning.enabled = self.skeletal_animation.frame_count > 0
-            self.driver_enabled_value = (
-                self.has_driver_bone() and self.animator.frame_count() > 0
-            )
+        self._blend_weights = []
+
+        source = self.skeletal_animation_source
+
+        if source is not None and self.rig is not None and source.frames:
+            animation = self._build_skeletal_animation(source)
+
+            if animation is not None and animation.frame_count > 0:
+                self.skeletal_animation = animation
+                self._refresh_driver_bone()
+                self.skinning.enabled = True
+                self.driver_enabled_value = (
+                    self.has_driver_bone() and self.animator.frame_count() > 0
+                )
+            else:
+                self.skinning.enabled = False
+                self.driver_enabled_value = False
         else:
             self.skinning.enabled = False
             self.driver_enabled_value = False
+
         self.skinning.set_animation(self.skeletal_animation)
+        self._update_root_motion()
+
+    def _build_skeletal_animation(self, source):
+        groupsize = self._blend_groupsize
+        has_grid = (
+            len(self._blend_cells) > 1
+            and (groupsize[0] > 1 or groupsize[1] > 1)
+        )
+
+        if not has_grid:
+            self._blend_weights = [({"model": source}, 1.0)]
+            return self._animation_for_cell(source)
+
+        weighted = self._weighted_blend_entries()
+        if not weighted:
+            return self._animation_for_cell(source)
+
+        self._blend_weights = weighted
+        animations = [
+            self._animation_for_cell(cell["model"]) for cell, _ in weighted
+        ]
+        weights = [weight for _, weight in weighted]
+
+        if len(animations) == 1 and weights[0] >= 0.999999:
+            return animations[0]
+
+        return BlendedSkeletalAnimation(animations, weights)
+
+    def _animation_for_cell(self, model):
+        key = id(model)
+        animation = self._cell_animation_cache.get(key)
+
+        if animation is None:
+            animation = SkeletalAnimation(model, self.rig)
+            self._cell_animation_cache[key] = animation
+
+        return animation
+
+    def _weighted_blend_entries(self):
+        groupsize_x = max(1, int(self._blend_groupsize[0]))
+        groupsize_y = max(1, int(self._blend_groupsize[1]))
+
+        position_x, position_y = self._blend_position
+        grid_x = max(0.0, min(1.0, position_x)) * (groupsize_x - 1)
+        grid_y = max(0.0, min(1.0, position_y)) * (groupsize_y - 1)
+
+        x0 = int(math.floor(grid_x))
+        y0 = int(math.floor(grid_y))
+        x1 = min(x0 + 1, groupsize_x - 1)
+        y1 = min(y0 + 1, groupsize_y - 1)
+        tx = grid_x - x0
+        ty = grid_y - y0
+
+        cells = {}
+        for cell in self._blend_cells:
+            model = cell.get("model")
+            if model is None:
+                continue
+            cells[(int(cell.get("x", 0)), int(cell.get("y", 0)))] = cell
+
+        corners = (
+            (x0, y0, (1.0 - tx) * (1.0 - ty)),
+            (x1, y0, tx * (1.0 - ty)),
+            (x0, y1, (1.0 - tx) * ty),
+            (x1, y1, tx * ty),
+        )
+
+        weighted = []
+        for x, y, weight in corners:
+            if weight <= 0.000001:
+                continue
+            cell = cells.get((x, y))
+            if cell is not None:
+                weighted.append((cell, weight))
+
+        if not weighted and cells:
+            nearest = min(
+                cells.values(),
+                key=lambda cell: (
+                    (int(cell.get("x", 0)) - grid_x) ** 2
+                    + (int(cell.get("y", 0)) - grid_y) ** 2
+                ),
+            )
+            weighted = [(nearest, 1.0)]
+
+        total = sum(weight for _, weight in weighted)
+        if total <= 0.0:
+            return []
+
+        return [(cell, weight / total) for cell, weight in weighted]
+
+    def _update_root_motion(self):
+        if (
+            not self._root_motion_enabled
+            or not self.skinning.enabled
+            or not self._blend_weights
+            or self.skeletal_animation is None
+        ):
+            self._root_motion_offset = (0.0, 0.0, 0.0)
+            self.root_motion_angle = 0.0
+            return
+
+        frame_count = self.skeletal_animation.frame_count
+        phase = 0.0
+        if frame_count > 1:
+            phase = max(0.0, min(self.skinning.frame / (frame_count - 1), 1.0))
+
+        offset = [0.0, 0.0, 0.0]
+        angle = 0.0
+
+        for cell, weight in self._blend_weights:
+            model = cell.get("model")
+            metadata = (getattr(model, "metadata", None) or {}) if model else {}
+            movements = metadata.get("movements") or []
+            if not movements:
+                continue
+
+            frames = int(metadata.get("source_frames", 0) or 0)
+            if frames <= 1:
+                frames = max(1, frame_count)
+            sample_frame = phase * (frames - 1)
+            displacement, movement_angle = _sample_movement(
+                movements, sample_frame
+            )
+
+            offset[0] += displacement[0] * weight
+            offset[1] += displacement[1] * weight
+            offset[2] += displacement[2] * weight
+            angle += movement_angle * weight
+
+        self._root_motion_offset = (offset[0], offset[1], offset[2])
+        self.root_motion_angle = angle
 
     def _refresh_driver_bone(self):
         self.driver_bone_ref_id = -1
@@ -1730,11 +1952,11 @@ class Renderer:
         max_z = float("-inf")
         for index in range(self.skeletal_animation.frame_count):
             if self.driver_bone_ref_id != -1:
-                transform = self.skeletal_animation.full_locals[index].get(
+                transform = self.skeletal_animation.sample(index).get(
                     self.driver_bone_ref_id
                 )
             else:
-                transform = self.skeletal_animation.extra_locals[index].get(
+                transform = self.skeletal_animation.sample_unmapped(index).get(
                     self.driver_track_id
                 )
             if transform is None:
@@ -1766,12 +1988,40 @@ class Renderer:
         self._gpu_normals = normals
         self._buffers_dirty = True
 
+    def _model_translation(self):
+        tx, ty, tz = self.model_position
+
+        if self._root_motion_enabled:
+            ox, oy, oz = self._root_motion_offset
+            rx, ry, rz = (math.radians(value) for value in self.model_rotation)
+
+            if rx or ry or rz:
+                cx, sx = math.cos(rx), math.sin(rx)
+                cy, sy = math.cos(ry), math.sin(ry)
+                cz, sz = math.cos(rz), math.sin(rz)
+
+                y1 = oy * cx - oz * sx
+                z1 = oy * sx + oz * cx
+
+                x2 = ox * cy + z1 * sy
+                z2 = -ox * sy + z1 * cy
+
+                ox = x2 * cz - y1 * sz
+                oy = x2 * sz + y1 * cz
+                oz = z2
+
+            tx += ox
+            ty += oy
+            tz += oz
+
+        return (tx, ty, tz)
+
     def _display_bounds(self):
         if not self.model or not self.model.has_geometry:
             return None, None
         min_bound = self.model.min_bound
         max_bound = self.model.max_bound
-        offset = self.model_position
+        offset = self._model_translation()
         return (
             (
                 min_bound[0] + offset[0],
@@ -1867,14 +2117,12 @@ class Renderer:
         # through the mesh instead of hiding inside it.
         glDisable(GL_DEPTH_TEST)
         glPushMatrix()
-        glTranslatef(
-            self.model_position[0],
-            self.model_position[1],
-            self.model_position[2],
-        )
+        glTranslatef(*self._model_translation())
         glRotatef(self.model_rotation[0], 1.0, 0.0, 0.0)
         glRotatef(self.model_rotation[1], 0.0, 1.0, 0.0)
         glRotatef(self.model_rotation[2], 0.0, 0.0, 1.0)
+        if self._root_motion_enabled and abs(self.root_motion_angle) > 0.000001:
+            glRotatef(self.root_motion_angle, 0.0, 0.0, 1.0)
         glLineWidth(2.0)
         glBegin(GL_LINES)
         glColor3f(1.0, 0.8, 0.2)
@@ -1925,14 +2173,12 @@ class Renderer:
             glDisable(GL_CULL_FACE)
 
         glPushMatrix()
-        glTranslatef(
-            self.model_position[0],
-            self.model_position[1],
-            self.model_position[2],
-        )
+        glTranslatef(*self._model_translation())
         glRotatef(self.model_rotation[0], 1.0, 0.0, 0.0)
         glRotatef(self.model_rotation[1], 0.0, 1.0, 0.0)
         glRotatef(self.model_rotation[2], 0.0, 0.0, 1.0)
+        if self._root_motion_enabled and abs(self.root_motion_angle) > 0.000001:
+            glRotatef(self.root_motion_angle, 0.0, 0.0, 1.0)
 
         use_checker = self.view_mode == "uv_checker"
         use_solid = self.view_mode == "solid"

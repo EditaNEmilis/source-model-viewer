@@ -106,12 +106,14 @@ def controls_html(theme=DARK_THEME):
         ("Model info label",
          "Triangles, bones, materials and clip count of the loaded model"),
         ("Clip dropdown", "Switch between animation clips (DMX, SMD, MDL, GoldSrc, beta probe)"),
-        ("Blend dropdown",
-         "Pick a blend direction when a sequence has several blends, such as walk_all"),
+        ("Pose parameter sliders",
+         "Blend a multi-blend sequence in one or two dimensions (walk/run directions, aim grids)"),
         ("Sequence slider", "Scrub through skeletal animation (SMD, DMX, MDL, GoldSrc, beta clips)"),
         ("Driver checkbox", "Let a driver bone control Intensity and Progress"),
-        ("Bodygroup dropdowns",
-         "Pick a GoldSrc model variant for each bodypart"),
+        ("Bodygroup selectors",
+         "View > Bodygroups... picks a variant for each bodypart"),
+        ("Root Motion",
+         "View > Root Motion moves the model with the sequence movement data"),
         ("View > Materials...",
          "List materials, their texture paths and any missing textures"),
     ]
@@ -132,7 +134,7 @@ def controls_html(theme=DARK_THEME):
         "<code>Intensity</code> blends from the basis shape toward the selected shape. "
         "<code>FPS</code> sets playback speed.</p>"
         "<p>The step buttons (<code>|&lt;</code>, <code>&lt;</code>, <code>&gt;</code>, "
-        "<code>&gt;|</code>) jump to the first, previous, next or last frame; "
+        "<code>&gt;|</code>) jump to the first, previous, next or last frame. "
         "<code>Left</code> / <code>Right</code> step one frame and "
         "<code>Home</code> / <code>End</code> jump to the first / last frame. "
         "<code>Loop</code> wraps playback at the end (on by default), and the "
@@ -145,6 +147,15 @@ def controls_html(theme=DARK_THEME):
         "<p><code>Clip</code> selects an animation clip (DMX, SMD sequence, "
         "compiled MDL sequence, HL1 alpha sequence, or retail GoldSrc sequence). "
         "<code>Sequence</code> scrubs through the current skeletal animation.</p>"
+        "<p>Retail MDL sequences with several blends show <code>Pose</code> "
+        "sliders instead of a direction list. One slider covers 1D direction "
+        "grids such as <code>walk_all</code>. Two sliders cover 2D grids such as "
+        "<code>Aim_all</code>. The neighbouring blend cells are interpolated "
+        "continuously.</p>"
+        "<p><code>View &gt; Root Motion</code> applies the sequence movement "
+        "table, so walk and run cycles travel instead of running in place. "
+        "<code>View &gt; Bodygroups...</code> switches each bodypart variant "
+        "without leaving the model.</p>"
         "<h2>Viewport and Model</h2>"
         "<p>Use <code>View</code> to toggle the ground grid, 3D axes, "
         "material view (Textured, Solid Color, UV Checker), wireframe overlay, "
@@ -184,6 +195,18 @@ def animation_html(theme=DARK_THEME):
         "and duration. External <code>.ani</code> blocks and <code>$includemodel</code> "
         "chains merge into the same dropdown. Animation-only MDLs (no "
         "<code>.vvd</code>/<code>.vtx</code>) still load bones and clips.</p>"
+        "<p>Multi-blend sequences interpolate across their blend grid using the "
+        "model's pose parameters. A 9x1 <code>walk_all</code> becomes one "
+        "direction slider. A 3x3 <code>Aim_all</code> becomes two sliders. The "
+        "surrounding cells (up to four on a 2D grid) are sampled and blended "
+        "per bone, with rotations interpolated in quaternion space.</p>"
+        "<p><code>Root Motion</code> reads <code>mstudiomovement_t</code> blocks "
+        "for the active blend cells and moves the model by the blended movement "
+        "vector. It is off by default. Enable it in the View menu or the Model "
+        "settings tab.</p>"
+        "<p>Retail MDL bodygroups decode every bodypart variant. Use "
+        "<code>View &gt; Bodygroups...</code> to switch variants. The current "
+        "clip and frame are preserved.</p>"
         "<h2>HL1 alpha notes</h2>"
         "<p>Version 6 alpha sequences decode per-bone position/rotation tracks. "
         "Event and pivot blocks are skipped via the track-base pointer, and sparse "
@@ -213,14 +236,18 @@ def formats_html(theme=DARK_THEME):
         "<p>Compiled Source engine models. The viewer parses the main <code>.mdl</code> header, "
         "reconstructs LOD 0 vertex pools from <code>.vvd</code> files, and reads optimized "
         "hardware triangle strips and lists from <code>.vtx</code> files (including dx90, dx80, "
-        "and generic vtx formats). Bones and skin-family tables are loaded directly.</p>"
+        "and generic vtx formats). Bones and skin-family tables are loaded directly. "
+        "Retail bodyparts keep every model variant for the Bodygroups dialog, and "
+        "multi-blend sequences interpolate through their pose parameters. "
+        "Demand-loaded <code>.ani</code> blocks and <code>$includemodel</code> chains "
+        "are resolved too.</p>"
         "<h2>GoldSrc MDL (HLMDL)</h2>"
         "<p>Half-Life 1 compiled models (IDST version 10). Loads bodyparts, "
         "bone hierarchy, bind pose, skin family 0 translation, and embedded "
         "8-bit palettized textures, including external <code>T.mdl</code> "
         "texture companion files (case-insensitive). Masked textures use binary "
         "transparency. Each bodypart exposes its model variants through the "
-        "bodygroup dropdowns, and only the selected variant is drawn. "
+        "bodygroup dialog, and only the selected variant is drawn. "
         "Local sequence group 0 decodes to playable clips. "
         "External <code>IDSQ</code> animation libraries "
         "explain themselves instead of failing to load.</p>"
@@ -231,15 +258,15 @@ def formats_html(theme=DARK_THEME):
         "<h2>HL2 beta MDL (v37)</h2>"
         "<p>2001-2003 era builds: 64-byte vertices, 196-byte bones, 68-byte meshes, "
         "and version 6 VTX strips. Geometry loads, including multi-bodypart "
-        "models, and the bodygroup dropdowns switch each bodypart variant. "
+        "models, and the bodygroup dialog switches each bodypart variant. "
         "Sequences decode into playable per-bone rotation clips with fps "
-        "and looping flags; root and position motion is not decoded, so clips play "
+        "and looping flags. Root and position motion is not decoded, so clips play "
         "in place (a known limitation).</p>"
         "<h2>Source 2 VMDL_C</h2>"
         "<p>Compiled Source 2 models: LZ4 + KV3 draw calls with VBIB-layout vertex/index "
         "buffers, positions, normals, UVs, and material names. The m_skeleton bone "
         "hierarchy, inverse bind poses and per-vertex blend indices/weights drive "
-        "bind-pose skinning; MRPH morph sets become shape keys, and vmat_c / vtex_c "
+        "bind-pose skinning. MRPH morph sets become shape keys, and vmat_c / vtex_c "
         "materials resolve base color textures. Truncated trailing scene data loads "
         "the complete draw calls with a status-bar note.</p>"
         "<h2>SMD</h2>"
@@ -270,7 +297,9 @@ def about_html(theme=DARK_THEME):
     body = (
         "<h2>Version " + __version__ + "</h2>"
         "<h2>What it reads</h2>"
-        "<p>Compiled Source models (.mdl, .vvd, .vtx) with skeletal clips, GoldSrc "
+        "<p>Compiled Source models (.mdl, .vvd, .vtx) with skeletal clips, "
+        "retail bodygroups, interpolated multi-blend sequences and optional "
+        "sequence movement (root motion), GoldSrc "
         "Half-Life models (.mdl), HL1 alpha (v6) and HL2 beta (v37) models with "
         "playable clips, Source 2 models (.vmdl_c) with m_skeleton skeletons, "
         "morph sets / shape keys and vmat_c / vtex_c materials, "

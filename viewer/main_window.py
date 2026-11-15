@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -61,6 +62,13 @@ class MainWindow(QMainWindow):
         self.flex_info_override = False
         self._bodygroup_model = None
         self._bodygroup_selection = []
+        self._bodygroup_defaults = []
+        self._bodygroup_dialog = None
+        self._pose_sliders = []
+        self._pose_value_labels = []
+        self._pose_axis_names = []
+        self._pose_ranges = []
+        self._pose_axis_indices = []
 
         self.setAcceptDrops(True)
 
@@ -163,10 +171,6 @@ class MainWindow(QMainWindow):
         self.clip_combo.setToolTip("Select animation clip")
         self.clip_combo.currentIndexChanged.connect(self.clip_changed)
 
-        self.blend_combo = QComboBox()
-        self.blend_combo.setToolTip("Select a blend direction for this sequence")
-        self.blend_combo.currentIndexChanged.connect(self.blend_changed)
-
         self.sequence_slider = QSlider(Qt.Horizontal)
         self.sequence_slider.setEnabled(False)
         self.sequence_slider.setRange(0, 1000)
@@ -217,38 +221,18 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(QLabel("Sequence"), 2, 4)
         controls_layout.addWidget(self.sequence_slider, 2, 5, 1, 2)
 
-        # Row 3: blend selector for multi-blend sequences.
-        self.blend_bar = QWidget()
-        blend_layout = QHBoxLayout(self.blend_bar)
-        blend_layout.setContentsMargins(0, 0, 0, 0)
-        blend_layout.setSpacing(6)
-        blend_layout.addWidget(QLabel("Blend"))
-        blend_layout.addWidget(self.blend_combo)
-        blend_layout.addStretch(1)
-        self.blend_bar.setVisible(False)
-        controls_layout.addWidget(self.blend_bar, 3, 0, 1, 7)
+        # Row 3: pose parameter sliders for multi-blend sequences.
+        self.pose_bar = QWidget()
+        self.pose_layout = QGridLayout(self.pose_bar)
+        self.pose_layout.setContentsMargins(0, 0, 0, 0)
+        self.pose_layout.setSpacing(4)
+        self.pose_layout.setColumnStretch(1, 1)
+        self.pose_bar.setVisible(False)
+        controls_layout.addWidget(self.pose_bar, 3, 0, 1, 7)
 
-        # Row 4: bodygroup selectors, one combo per bodypart. Hidden for
-        # formats without bodygroup metadata. The scroll area keeps long
-        # selector rows (beta models have many bodyparts) from widening
-        # the window.
-        self.bodygroup_bar = QWidget()
-        self.bodygroup_layout = QHBoxLayout(self.bodygroup_bar)
-        self.bodygroup_layout.setContentsMargins(0, 0, 0, 0)
-        self.bodygroup_layout.setSpacing(6)
-        self.bodygroup_scroll = QScrollArea()
-        self.bodygroup_scroll.setFrameShape(QFrame.NoFrame)
-        self.bodygroup_scroll.setWidgetResizable(False)
-        self.bodygroup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.bodygroup_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.bodygroup_scroll.setFixedHeight(34)
-        self.bodygroup_scroll.setWidget(self.bodygroup_bar)
-        self.bodygroup_scroll.setVisible(False)
-        controls_layout.addWidget(self.bodygroup_scroll, 4, 0, 1, 7)
-
-        # Row 5 / 6: persistent readouts, separated from the controls.
-        controls_layout.addWidget(separator, 5, 0, 1, 7)
-        controls_layout.addWidget(info_strip, 6, 0, 1, 7)
+        # Row 4 / 5: persistent readouts, separated from the controls.
+        controls_layout.addWidget(separator, 4, 0, 1, 7)
+        controls_layout.addWidget(info_strip, 5, 0, 1, 7)
 
         controls_layout.setColumnStretch(2, 1)
         controls_layout.setColumnStretch(5, 1)
@@ -265,7 +249,6 @@ class MainWindow(QMainWindow):
         self._create_menus()
 
         self._clip_models = []
-        self._blend_models = []
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self.advance_frame)
@@ -476,6 +459,21 @@ class MainWindow(QMainWindow):
         )
         self.materials_action.triggered.connect(self.show_materials)
 
+        self.bodygroups_action = QAction("&Bodygroups...", self)
+        self.bodygroups_action.setStatusTip(
+            "Choose one variant per bodypart without leaving the dialog"
+        )
+        self.bodygroups_action.setEnabled(False)
+        self.bodygroups_action.triggered.connect(self.show_bodygroups)
+
+        self.root_motion_action = QAction("Root &Motion", self)
+        self.root_motion_action.setCheckable(True)
+        self.root_motion_action.setChecked(False)
+        self.root_motion_action.setStatusTip(
+            "Move the model with the sequence's movement data (walk/run cycles)"
+        )
+        self.root_motion_action.triggered.connect(self.toggle_root_motion)
+
     def _create_menus(self):
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_action)
@@ -500,11 +498,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_controls_action)
         view_menu.addSeparator()
         view_menu.addAction(self.materials_action)
+        view_menu.addAction(self.bodygroups_action)
         view_menu.addSeparator()
         view_menu.addAction(self.solid_view_action)
         view_menu.addAction(self.uv_checker_action)
         view_menu.addAction(self.wireframe_action)
         view_menu.addAction(self.skeleton_action)
+        view_menu.addAction(self.root_motion_action)
         view_menu.addSeparator()
         view_menu.addAction(self.auto_match_action)
         view_menu.addAction(self.culling_action)
@@ -601,7 +601,7 @@ class MainWindow(QMainWindow):
         self.sequence_slider.setValue(0)
         self.sequence_slider.blockSignals(False)
 
-        self._update_blend_selector()
+        self._update_pose_controls()
 
         self.stop_playback()
         self.update_animation_ui()
@@ -828,7 +828,7 @@ class MainWindow(QMainWindow):
 
         if len(paths) > 1:
             self.statusBar().showMessage(
-                f"Loading {os.path.basename(paths[0])}; "
+                f"Loading {os.path.basename(paths[0])}. "
                 f"{len(paths) - 1} other file(s) ignored"
             )
 
@@ -1144,74 +1144,58 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
-    def _clear_bodygroup_widgets(self):
-        while self.bodygroup_layout.count():
-            item = self.bodygroup_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
     def _set_bodygroups(self, model):
-        self._clear_bodygroup_widgets()
         self._bodygroup_model = model
-        self._bodygroup_selection = []
 
         metadata = (getattr(model, "metadata", None) or {}) if model else {}
         groups = metadata.get("bodygroups") or []
-        if not groups:
-            self.bodygroup_scroll.setVisible(False)
-            return
-
         saved = metadata.get("bodygroup_selection") or []
-        added = False
+
+        selection = []
 
         for group_index, group in enumerate(groups):
             options = group.get("options") or []
-            name = group.get("name") or f"Body {group_index + 1}"
-
-            if not options:
-                self._bodygroup_selection.append(0)
-                continue
-
-            label = QLabel(name)
-            label.setToolTip(f"Bodygroup: {name}")
-
-            combo = QComboBox()
-            combo.setMaximumWidth(190)
-            for option_index, option_name in enumerate(options):
-                combo.addItem(option_name or f"Option {option_index + 1}", option_index)
-            combo.setToolTip("Options: " + ", ".join(options))
-
             current = saved[group_index] if group_index < len(saved) else 0
             try:
                 current = int(current)
             except (TypeError, ValueError):
                 current = 0
             current = max(0, min(current, max(0, len(options) - 1)))
-            combo.setCurrentIndex(current)
-            self._bodygroup_selection.append(current)
-            combo.currentIndexChanged.connect(
-                lambda choice, index=group_index: self.bodygroup_changed(index, choice)
-            )
+            selection.append(current)
 
-            self.bodygroup_layout.addWidget(label)
-            self.bodygroup_layout.addWidget(combo)
-            added = True
+        self._bodygroup_selection = selection
+        self._bodygroup_defaults = list(selection)
+        self.bodygroups_action.setEnabled(bool(groups))
 
-        if added:
-            self.bodygroup_layout.activate()
-            self.bodygroup_bar.adjustSize()
-        self.bodygroup_scroll.setVisible(added)
+        if self._bodygroup_dialog is not None:
+            self._bodygroup_dialog.close()
+            self._bodygroup_dialog = None
 
-    def bodygroup_changed(self, group_index, choice):
+    def _bodygroup_name(self, group_index):
+        metadata = (getattr(self._bodygroup_model, "metadata", None) or {})
+        groups = metadata.get("bodygroups") or []
+        if 0 <= group_index < len(groups):
+            return groups[group_index].get("name") or f"Body {group_index + 1}"
+        return f"Body {group_index + 1}"
+
+    def _bodygroup_option_name(self, group_index, choice):
+        metadata = (getattr(self._bodygroup_model, "metadata", None) or {})
+        groups = metadata.get("bodygroups") or []
+        if 0 <= group_index < len(groups):
+            options = groups[group_index].get("options") or []
+            if 0 <= choice < len(options):
+                return options[choice]
+        return f"option {choice + 1}"
+
+    def _apply_bodygroup_selection(self, selection):
         if self._bodygroup_model is None:
             return
-        if not 0 <= group_index < len(self._bodygroup_selection):
-            return
-
-        self._bodygroup_selection[group_index] = int(choice)
 
         from viewer.smd_parser import compose_bodygroup_model
+
+        self._bodygroup_selection = [
+            max(0, int(value)) for value in selection
+        ]
 
         composed = compose_bodygroup_model(
             self._bodygroup_model, self._bodygroup_selection
@@ -1222,9 +1206,113 @@ class MainWindow(QMainWindow):
         self.viewport.set_model(composed, preserve_view=True)
         self.viewport.update()
         self.update_model_info()
+
+    def bodygroup_changed(self, group_index, choice):
+        if self._bodygroup_model is None:
+            return
+        if not 0 <= group_index < len(self._bodygroup_selection):
+            return
+
+        self._bodygroup_selection[group_index] = int(choice)
+        self._apply_bodygroup_selection(self._bodygroup_selection)
+
         self.statusBar().showMessage(
-            f"Bodygroup {group_index + 1} set to option {int(choice) + 1}"
+            f"{self._bodygroup_name(group_index)} set to "
+            f"{self._bodygroup_option_name(group_index, int(choice))}"
         )
+
+    def show_bodygroups(self):
+        metadata = (getattr(self._bodygroup_model, "metadata", None) or {})
+        groups = metadata.get("bodygroups") or []
+
+        if not groups:
+            self.statusBar().showMessage("This model has no bodygroups")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Bodygroups")
+        dialog.resize(460, 520)
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+
+        summary = QLabel(
+            f"{len(groups)} bodypart(s). Pick one variant per part. "
+            "The viewport updates in place."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(4, 4, 4, 4)
+        form.setSpacing(6)
+
+        combos = []
+
+        for group_index, group in enumerate(groups):
+            options = group.get("options") or []
+            label = QLabel(group.get("name") or f"Body {group_index + 1}")
+            label.setToolTip("Bodygroup options: " + ", ".join(options))
+
+            combo = QComboBox()
+            for option_index, option_name in enumerate(options):
+                combo.addItem(option_name or f"Option {option_index + 1}", option_index)
+
+            current = (
+                self._bodygroup_selection[group_index]
+                if group_index < len(self._bodygroup_selection)
+                else 0
+            )
+            combo.setCurrentIndex(
+                max(0, min(current, max(0, len(options) - 1)))
+            )
+            combo.currentIndexChanged.connect(
+                lambda choice, index=group_index: self.bodygroup_changed(index, choice)
+            )
+
+            combos.append(combo)
+            form.addRow(label, combo)
+
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+
+        buttons = QHBoxLayout()
+
+        reset_button = QPushButton("Reset to Default")
+        close_button = QPushButton("Close")
+
+        def reset_defaults():
+            defaults = list(self._bodygroup_defaults)
+            for index, combo in enumerate(combos):
+                if index >= len(defaults):
+                    continue
+                combo.blockSignals(True)
+                combo.setCurrentIndex(
+                    max(0, min(defaults[index], combo.count() - 1))
+                )
+                combo.blockSignals(False)
+            self._apply_bodygroup_selection(defaults)
+            self.statusBar().showMessage("Bodygroups reset to defaults")
+
+        reset_button.clicked.connect(reset_defaults)
+        close_button.clicked.connect(dialog.accept)
+
+        buttons.addWidget(reset_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        self._bodygroup_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._bodygroup_dialog = None
+            dialog.close()
 
     def _try_auto_flex_info(self, file_path):
         base_path = os.path.splitext(file_path)[0]
@@ -1377,6 +1465,22 @@ class MainWindow(QMainWindow):
 
     def toggle_skeleton(self):
         self.viewport.set_show_skeleton(self.skeleton_action.isChecked())
+
+    def toggle_root_motion(self):
+        enabled = self.root_motion_action.isChecked()
+        self.viewport.set_root_motion(enabled)
+
+        settings = QSettings("SourceModelViewer", "Settings")
+        settings.setValue("model/root_motion", enabled)
+
+        if enabled:
+            self.statusBar().showMessage(
+                "Root motion enabled: walk and run cycles move the model"
+            )
+        else:
+            self.statusBar().showMessage("Root motion disabled")
+
+        self.update_frame_label()
 
     def toggle_solid_view(self):
         if self.solid_view_action.isChecked():
@@ -1861,6 +1965,11 @@ class MainWindow(QMainWindow):
                 progress = self.viewport.progress()
                 text += f"  I:{intensity:.2f} P:{progress:.2f}"
 
+            if self.root_motion_action.isChecked():
+                offset = self.viewport.root_motion_offset()
+                distance = (offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2) ** 0.5
+                text += f"  Move:{distance:.1f}"
+
             self.frame_label.setText(text)
             return
 
@@ -1904,16 +2013,60 @@ class MainWindow(QMainWindow):
     def clip_changed(self, index):
         if index >= 0 and self.viewport:
             self.viewport.set_animation_clip(index)
-            self._update_blend_selector()
+            self._update_pose_controls()
             self.sequence_slider.setValue(0)
             self.stop_playback()
             self.update_animation_ui()
             self._maybe_autoplay()
 
-    def _update_blend_selector(self):
-        self.blend_combo.blockSignals(True)
-        self.blend_combo.clear()
-        self._blend_models = []
+    def _clear_pose_controls(self):
+        while self.pose_layout.count():
+            item = self.pose_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._pose_sliders = []
+        self._pose_value_labels = []
+        self._pose_axis_names = []
+        self._pose_ranges = []
+        self._pose_axis_indices = []
+
+    def _pose_axis_spec(self, metadata, axis):
+        groupsize = metadata.get("groupsize") or (1, 1)
+
+        try:
+            size = int(groupsize[axis])
+        except (TypeError, ValueError, IndexError):
+            size = 1
+
+        if size <= 1:
+            return None
+
+        names = metadata.get("pose_param_names") or ("", "")
+        starts = metadata.get("paramstart") or (0.0, 1.0)
+        ends = metadata.get("paramend") or (1.0, 0.0)
+
+        try:
+            name = names[axis] if axis < len(names) else ""
+        except (TypeError, IndexError):
+            name = ""
+        if not name:
+            name = f"Blend {axis + 1}"
+
+        try:
+            start = float(starts[axis])
+            end = float(ends[axis])
+        except (TypeError, ValueError, IndexError):
+            start, end = 0.0, 1.0
+
+        if abs(end - start) < 0.000001:
+            start, end = 0.0, 1.0
+
+        return name, start, end
+
+    def _update_pose_controls(self):
+        self._clear_pose_controls()
 
         model = None
         index = self.clip_combo.currentIndex()
@@ -1921,31 +2074,78 @@ class MainWindow(QMainWindow):
             model = self._clip_models[index][1]
 
         metadata = (getattr(model, "metadata", None) or {}) if model else {}
-        blends = metadata.get("sequence_blends") or []
-        self._blend_models = blends
+        specs = []
 
-        for blend_index, blend in enumerate(blends):
-            frames = len(getattr(blend.get("model"), "frames", []) or [])
-            self.blend_combo.addItem(
-                f"{blend_index + 1} of {len(blends)} ({frames}f)", blend_index
+        for axis in range(2):
+            spec = self._pose_axis_spec(metadata, axis)
+            if spec is not None:
+                specs.append((axis, spec))
+
+        if not specs:
+            self.pose_bar.setVisible(False)
+            return
+
+        for row, (axis, (name, start, end)) in enumerate(specs):
+            label = QLabel(name)
+            label.setToolTip(f"Pose parameter: {name}")
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 1000)
+            slider.setValue(500)
+            slider.setSingleStep(10)
+            slider.setPageStep(100)
+            slider.setToolTip(f"{name}: {start:g} to {end:g}")
+            slider.valueChanged.connect(
+                lambda _value, axis_index=axis: self.pose_slider_changed(axis_index)
             )
-        self.blend_combo.setCurrentIndex(0)
-        self.blend_combo.blockSignals(False)
-        self.blend_bar.setVisible(len(blends) > 1)
 
-    def blend_changed(self, index):
-        if not 0 <= index < len(self._blend_models):
-            return
+            value_label = QLabel("")
+            value_label.setMinimumWidth(64)
+            value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        model = self._blend_models[index].get("model")
-        if model is None:
-            return
+            self.pose_layout.addWidget(label, row, 0)
+            self.pose_layout.addWidget(slider, row, 1)
+            self.pose_layout.addWidget(value_label, row, 2)
 
-        self.viewport.set_skeletal_animation_model(model, preserve_frame=True)
+            self._pose_sliders.append(slider)
+            self._pose_value_labels.append(value_label)
+            self._pose_axis_names.append(name)
+            self._pose_ranges.append((start, end))
+            self._pose_axis_indices.append(axis)
+
+        self.pose_bar.setVisible(True)
+        self._update_pose_value_labels()
+        self.viewport.set_skeletal_blend_position(0.5, 0.5)
+
+    def pose_slider_changed(self, axis):
+        x = 0.5
+        y = 0.5
+
+        for slider, slider_axis in zip(
+            self._pose_sliders, self._pose_axis_indices
+        ):
+            value = slider.value() / 1000.0
+            if slider_axis == 0:
+                x = value
+            else:
+                y = value
+
+        self.viewport.set_skeletal_blend_position(x, y)
+        self._update_pose_value_labels()
         self.update_frame_label()
-        self.statusBar().showMessage(
-            f"Blend {index + 1} of {len(self._blend_models)}"
-        )
+
+    def _update_pose_value_labels(self):
+        for index, (slider, label) in enumerate(
+            zip(self._pose_sliders, self._pose_value_labels)
+        ):
+            name = self._pose_axis_names[index]
+            start, end = self._pose_ranges[index]
+            value = start + (slider.value() / 1000.0) * (end - start)
+            suffix = ""
+            lowered = name.lower()
+            if any(token in lowered for token in ("yaw", "pitch", "roll")):
+                suffix = "\u00b0"
+            label.setText(f"{value:.2f}{suffix}")
 
     def sequence_progress_changed(self, value):
         progress = value / 1000.0
@@ -2032,6 +2232,10 @@ class MainWindow(QMainWindow):
         show_skeleton = settings.value("model/show_skeleton", False, type=bool)
         self.skeleton_action.setChecked(show_skeleton)
         self.viewport.set_show_skeleton(show_skeleton)
+
+        root_motion = settings.value("model/root_motion", False, type=bool)
+        self.root_motion_action.setChecked(root_motion)
+        self.viewport.set_root_motion(root_motion)
 
         # Playback defaults
         loop_default = settings.value("defaults/loop", True, type=bool)

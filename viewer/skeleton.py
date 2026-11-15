@@ -388,6 +388,186 @@ class SkeletalAnimation:
 
         return result
         
+class BlendedSkeletalAnimation:
+    """Sample several skeletal animations and blend their local transforms.
+
+    This is used for Source multi-blend sequences (walk/run direction grids
+    and 2D gesture grids). Each child animation is sampled at the same
+    normalised phase, then positions are averaged and rotations are
+    normalised-lerped in quaternion space so the result follows the short
+    rotational path.
+    """
+
+    def __init__(self, animations, weights):
+        pairs = []
+        total = 0.0
+
+        for animation, weight in zip(animations, weights):
+            if animation is None or animation.frame_count <= 0:
+                continue
+            weight = float(weight)
+            if weight <= 0.0:
+                continue
+            pairs.append([animation, weight])
+            total += weight
+
+        if total <= 0.0 and animations:
+            for animation in animations:
+                if animation is not None and animation.frame_count > 0:
+                    pairs.append([animation, 1.0])
+                    total = 1.0
+                    break
+
+        self.parts = [(animation, weight / total) for animation, weight in pairs]
+        self.frame_count = max(
+            (animation.frame_count for animation, _ in self.parts), default=0
+        )
+        primary = self.parts[0][0] if self.parts else None
+
+        if primary is None:
+            self.bone_ids = []
+            self.bind_local = {}
+            self.anim_bone_count = 0
+            self.name_mapped_count = 0
+            self.driven_ref_ids = set()
+            self.unmapped_names = {}
+            return
+
+        self.bone_ids = primary.bone_ids
+        self.bind_local = primary.bind_local
+        self.anim_bone_count = max(
+            animation.anim_bone_count for animation, _ in self.parts
+        )
+        self.name_mapped_count = max(
+            animation.name_mapped_count for animation, _ in self.parts
+        )
+        self.driven_ref_ids = set()
+        self.unmapped_names = {}
+
+        for animation, _ in self.parts:
+            self.driven_ref_ids.update(animation.driven_ref_ids)
+            self.unmapped_names.update(animation.unmapped_names)
+
+    def sample(self, frame: float) -> Dict[int, Transform]:
+        if not self.parts or self.frame_count == 0:
+            return {}
+
+        if len(self.parts) == 1:
+            return self.parts[0][0].sample(frame)
+
+        phase = 0.0
+        if self.frame_count > 1:
+            phase = max(0.0, min(float(frame) / (self.frame_count - 1), 1.0))
+
+        child_samples = []
+        for animation, weight in self.parts:
+            child_frame = phase * max(0, animation.frame_count - 1)
+            child_samples.append((animation.sample(child_frame), weight, animation))
+
+        result: Dict[int, Transform] = {}
+
+        for bone_id in self.bone_ids:
+            weighted_positions = []
+            weighted_rotations = []
+
+            for transforms, weight, animation in child_samples:
+                transform = transforms.get(bone_id)
+                if transform is None:
+                    transform = animation.bind_local.get(bone_id)
+                if transform is None:
+                    continue
+                weighted_positions.append((transform[0], weight))
+                weighted_rotations.append((transform[1], weight))
+
+            if not weighted_positions:
+                continue
+
+            result[bone_id] = (
+                _weighted_position(weighted_positions),
+                _weighted_rotation(weighted_rotations),
+            )
+
+        return result
+
+    def sample_unmapped(self, frame: float) -> Dict[int, Transform]:
+        if not self.parts or self.frame_count == 0:
+            return {}
+
+        if len(self.parts) == 1:
+            return self.parts[0][0].sample_unmapped(frame)
+
+        phase = 0.0
+        if self.frame_count > 1:
+            phase = max(0.0, min(float(frame) / (self.frame_count - 1), 1.0))
+
+        child_samples = []
+        for animation, weight in self.parts:
+            child_frame = phase * max(0, animation.frame_count - 1)
+            child_samples.append(
+                (animation.sample_unmapped(child_frame), weight)
+            )
+
+        result: Dict[int, Transform] = {}
+
+        for bone_id in self.unmapped_names:
+            weighted_positions = []
+            weighted_rotations = []
+
+            for transforms, weight in child_samples:
+                transform = transforms.get(bone_id)
+                if transform is None:
+                    continue
+                weighted_positions.append((transform[0], weight))
+                weighted_rotations.append((transform[1], weight))
+
+            if not weighted_positions:
+                continue
+
+            result[bone_id] = (
+                _weighted_position(weighted_positions),
+                _weighted_rotation(weighted_rotations),
+            )
+
+        return result
+
+
+def _weighted_position(samples):
+    x = 0.0
+    y = 0.0
+    z = 0.0
+    for (position, weight) in samples:
+        x += position[0] * weight
+        y += position[1] * weight
+        z += position[2] * weight
+    return (x, y, z)
+
+
+def _weighted_rotation(samples):
+    if not samples:
+        return (0.0, 0.0, 0.0)
+
+    if len(samples) == 1:
+        return samples[0][0]
+
+    qx = qy = qz = qw = 0.0
+
+    for euler, weight in samples:
+        q = quat_from_euler(euler)
+        if qx * q[0] + qy * q[1] + qz * q[2] + qw * q[3] < 0.0:
+            q = (-q[0], -q[1], -q[2], -q[3])
+        qx += q[0] * weight
+        qy += q[1] * weight
+        qz += q[2] * weight
+        qw += q[3] * weight
+
+    length = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+
+    if length < 0.00000001:
+        return (0.0, 0.0, 0.0)
+
+    return quat_to_euler((qx / length, qy / length, qz / length, qw / length))
+
+
 def quat_to_euler(q):
     x, y, z, w = q
 
