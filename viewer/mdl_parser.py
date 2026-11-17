@@ -1597,6 +1597,49 @@ def _beta_group_blocks(data: bytes, n: int, count: int, table: int,
         return None
 
 
+def _beta_read_movements(data: bytes, record: int, numframes: int) -> list:
+    """Read v37 mstudiomovement_t blocks for one animation description.
+
+    Beta animation records store ``nummovements`` at +16 and a record-relative
+    ``movementindex`` at +20. Each movement is 44 bytes, unlike the 32 byte
+    stride used by the retail reader.
+    """
+    try:
+        count = struct.unpack_from("<i", data, record + 16)[0]
+        index = struct.unpack_from("<i", data, record + 20)[0]
+    except struct.error:
+        return []
+
+    count = max(0, min(count, 16))
+    if count <= 0 or index <= 0:
+        return []
+
+    movements = []
+    for i in range(count):
+        offset = record + index + i * 44
+        if offset + 44 > len(data):
+            break
+        (
+            endframe, motionflags, v0, v1, angle,
+            vx, vy, vz, px, py, pz,
+        ) = struct.unpack_from("<2i9f", data, offset)
+        if not all(math.isfinite(value) for value in (
+                v0, v1, angle, vx, vy, vz, px, py, pz)):
+            continue
+        if endframe < 0 or endframe > numframes:
+            continue
+        movements.append({
+            "endframe": int(endframe),
+            "motionflags": int(motionflags),
+            "v0": float(v0),
+            "v1": float(v1),
+            "angle": float(angle),
+            "vector": (float(vx), float(vy), float(vz)),
+            "position": (float(px), float(py), float(pz)),
+        })
+    return movements
+
+
 def _beta_animation_clips(mdl_path, data, bones, base_transforms):
     # HL2 beta (v37, 2002 leak branch) rotation decoder.
     #
@@ -1618,9 +1661,10 @@ def _beta_animation_clips(mdl_path, data, bones, base_transforms):
     # at the bone bind rotation. Decoded angle =
     #   bind_euler + raw * bone_rot_scale
     # with bind euler at bone+44 and rot scales at bone+68 (196 byte
-    # bone stride). Entries carry only rotation: bones without motion
-    # (and position tracks, including pelvis root motion) are left at
-    # the bind pose, so beta clips play in place.
+    # bone stride). Entries carry only rotation: bones without motion are
+    # left at the bind pose. Translation comes from the record's own
+    # mstudiomovement_t blocks (nummovements/movementindex at +16/+20),
+    # which feed the shared Root Motion path.
     # Names come from single-animation sequences (explicit anim indices)
     # plus the leading run of the file's a_ name pool once it validates
     # against those sequence names; anything else stays anim_N.
@@ -1750,6 +1794,9 @@ def _beta_animation_clips(mdl_path, data, bones, base_transforms):
             "beta_stream_format": "perframe" if alt_used else "rle",
             "beta_bone_attribution": diag.get("bone_attribution", "bind"),
         })
+        movements = _beta_read_movements(data, off, numframes)
+        if movements:
+            model.metadata["movements"] = movements
         clips.append((name, model))
     return clips, True
 
@@ -2141,6 +2188,12 @@ def parse_mdl(mdl_path: str) -> SmdModel:
             "This is an external GoldSrc animation library (IDSQ), not a "
             "renderable model. Open the base model instead. Its sequence "
             "groups reference this file."
+        )
+
+    if len(data) >= 4 and data[:4] == b"IDPO":
+        raise MdlParseError(
+            "This is a Quake IDPO model, not a Half-Life studio MDL. "
+            "The viewer does not decode that format."
         )
 
     if len(data) < 408:

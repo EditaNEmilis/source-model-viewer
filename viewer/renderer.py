@@ -342,6 +342,9 @@ class Renderer:
         self.model_position = [0.0, 0.0, 0.0]
         self.model_rotation = [0.0, 0.0, 0.0]
         self.model_center = [0.0, 0.0, 0.0]
+        # Keeps a bodygroup variant's bounds centred on the grid without
+        # moving the grid or the camera when the variant has different bounds.
+        self._center_offset = [0.0, 0.0, 0.0]
 
         self._static_positions = None
         self._static_normals = None
@@ -578,6 +581,7 @@ class Renderer:
         current animation frame, which lets callers swap geometry in place
         (bodygroup switching)."""
         preserved_frame = float(self.skinning.frame) if preserve_view else None
+        previous_center = list(self.model_center)
         self.model = model
         self.model_material_dirs = []
         if model and hasattr(model, "metadata") and "material_dirs" in model.metadata:
@@ -613,13 +617,25 @@ class Renderer:
             # The grid and axes are drawn around the model center. Keep the
             # original center during a bodygroup swap, otherwise the ground
             # jumps when a variant has different bounds.
+            new_center = [
+                (model.min_bound[0] + model.max_bound[0]) * 0.5,
+                (model.min_bound[1] + model.max_bound[1]) * 0.5,
+                (model.min_bound[2] + model.max_bound[2]) * 0.5,
+            ]
             if not preserve_view:
-                self.model_center = [
-                    (model.min_bound[0] + model.max_bound[0]) * 0.5,
-                    (model.min_bound[1] + model.max_bound[1]) * 0.5,
-                    (model.min_bound[2] + model.max_bound[2]) * 0.5,
-                ]
+                self.model_center = new_center
+                self._center_offset = [0.0, 0.0, 0.0]
                 self.reset_camera()
+            else:
+                # The grid and camera keep the original center. Shift the
+                # new variant so its own center lands on that same point;
+                # otherwise a differently sized option appears off-center
+                # and can clip against the viewport.
+                self._center_offset = [
+                    previous_center[axis] - new_center[axis]
+                    for axis in range(3)
+                ]
+                self.camera.refit(model.min_bound, model.max_bound)
 
             colors = self._build_colors()
             indices = self._build_material_batches()
@@ -637,6 +653,7 @@ class Renderer:
         else:
             self.model_center = [0.0, 0.0, 0.0]
             if not preserve_view:
+                self._center_offset = [0.0, 0.0, 0.0]
                 self.camera.reset()
 
         if model and model.bones:
@@ -1646,6 +1663,7 @@ class Renderer:
 
     def reset_all(self):
         self.reset_model_transform()
+        self._center_offset = [0.0, 0.0, 0.0]
         self.reset_camera()
         self.set_progress(0.0)
         self.set_intensity(1.0)
@@ -1990,6 +2008,9 @@ class Renderer:
 
     def _model_translation(self):
         tx, ty, tz = self.model_position
+        tx += self._center_offset[0]
+        ty += self._center_offset[1]
+        tz += self._center_offset[2]
 
         if self._root_motion_enabled:
             ox, oy, oz = self._root_motion_offset

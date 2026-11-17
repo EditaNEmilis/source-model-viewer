@@ -32,6 +32,27 @@ TRANSPARENT_INDEX = 255
 RETAIL_SEQUENCE_SIZE = 176
 RETAIL_SEQUENCE_GROUP_SIZE = 104
 RETAIL_SEQUENCE_HEADER_SIZE = 76
+RETAIL_BONE_CONTROLLER_SIZE = 24
+
+# STUDIO_* motion flags from the GoldSrc SDK's studio.h, used to label
+# sequence blend axes when a model has no textual pose parameter names.
+STUDIO_MOTION_TYPES = (
+    (0x0001, "X"),
+    (0x0002, "Y"),
+    (0x0004, "Z"),
+    (0x0008, "XR"),
+    (0x0010, "YR"),
+    (0x0020, "ZR"),
+    (0x0040, "LX"),
+    (0x0080, "LY"),
+    (0x0100, "LZ"),
+    (0x0200, "AX"),
+    (0x0400, "AY"),
+    (0x0800, "AZ"),
+    (0x1000, "AXR"),
+    (0x2000, "AYR"),
+    (0x4000, "AZR"),
+)
 
 
 def is_gldsrc_version(version: int) -> bool:
@@ -40,6 +61,87 @@ def is_gldsrc_version(version: int) -> bool:
 
 def _read_name(raw: bytes) -> str:
     return raw.split(b"\x00", 1)[0].decode("latin-1", errors="ignore").strip()
+
+
+def _parse_bone_controllers(data: bytes, count: int, offset: int) -> dict:
+    """Read mstudiobonecontroller_t records, keyed by controller index.
+
+    GoldSrc controllers have no name string. ``index`` is the user-facing
+    0-3 controller number (4 is the mouth), and ``type`` carries the
+    STUDIO_* motion flags that a sequence blend axis refers to.
+    """
+    controllers = {}
+    if count <= 0 or offset <= 0:
+        return controllers
+    for i in range(min(int(count), 64)):
+        record = offset + i * RETAIL_BONE_CONTROLLER_SIZE
+        if record + RETAIL_BONE_CONTROLLER_SIZE > len(data):
+            break
+        try:
+            bone, ctrl_type, start, end, rest, index = struct.unpack_from(
+                "<2i2f2i", data, record
+            )
+        except struct.error:
+            break
+        controllers[index] = {
+            "bone": bone,
+            "type": ctrl_type,
+            "start": float(start),
+            "end": float(end),
+            "rest": rest,
+            "index": index,
+        }
+    return controllers
+
+
+def _blend_axis_label(blend_type, axis, controllers) -> str:
+    """Name a GoldSrc blend axis from its STUDIO_* motion flags."""
+    flags = int(blend_type or 0) & 0x7FFF
+    suffixes = [name for bit, name in STUDIO_MOTION_TYPES if flags & bit]
+    suffix = "/".join(suffixes)
+
+    label = suffix or f"Blend {axis + 1}"
+    if flags:
+        for controller in (controllers or {}).values():
+            if (int(controller.get("type", 0)) & 0x7FFF) != flags:
+                continue
+            index = int(controller.get("index", -1))
+            if 0 <= index <= 3:
+                label = f"Controller {index + 1}"
+            elif index == 4:
+                label = "Mouth"
+            break
+
+    if suffix and label != suffix:
+        return f"{label} ({suffix})"
+    return label
+
+
+def _blend_groupsize(desc) -> tuple:
+    """Infer the blend grid from a GoldSrc sequence description."""
+    count = max(1, int(desc.get("numblends", 1) or 1))
+    blend_type = desc.get("blend_type") or (0, 0)
+    if count >= 4 and blend_type[0] and blend_type[1] and count % 2 == 0:
+        return (2, 2)
+    return (count, 1)
+
+
+def _gold_movements(desc) -> list:
+    """Turn a GoldSrc sequence's linearmovement into renderer movement blocks."""
+    raw = desc.get("linearmovement") or (0.0, 0.0, 0.0)
+    try:
+        position = tuple(float(value) for value in raw)
+    except (TypeError, ValueError):
+        return []
+    if len(position) != 3 or not all(math.isfinite(value) for value in position):
+        return []
+    if not any(abs(value) > 1e-6 for value in position):
+        return []
+    return [{
+        "endframe": max(0, int(desc.get("numframes", 1)) - 1),
+        "position": position,
+        "angle": 0.0,
+    }]
 
 
 def _find_texture_mdl(mdl_path: str):
@@ -337,8 +439,84 @@ def _alpha_animation(data: bytes, numbones: int, numseq: int, seqindex: int):
             "name": desc["name"],
             "looping": bool(desc["flags"] & 0x1),
         })
+        movements = _gold_movements(desc)
+        if movements:
+            clip.metadata["movements"] = movements
         clips.append((desc["name"], clip))
     return bind_pose, clips
+
+
+def _parse_v4_alpha_mdl(data: bytes) -> SmdModel:
+    """Decode the parts of the HL1 alpha v4 layout that are understood.
+
+    The nine v4 samples in the alpha folder share a reliable bone table and
+    sequence table. Geometry, textures and animation tracks use an
+    undocumented layout, so the returned model carries the skeleton and
+    bind-pose clips with the real names and frame counts, and reports the
+    limitation instead of failing to open.
+    """
+    raw_bones = struct.unpack_from("<i", data, 12)[0] - 2
+    numseq = struct.unpack_from("<i", data, 24)[0]
+    if not 0 < raw_bones <= 512:
+        raise ValueError(f"Alpha v4 MDL bone count out of range: {raw_bones}")
+    boneindex = 64
+    seqindex = boneindex + raw_bones * 20 + 12
+    numseq = max(0, min(numseq, 1024))
+    if seqindex + numseq * 40 > len(data):
+        raise ValueError("Alpha v4 MDL sequence table out of range")
+
+    bones = []
+    bind_transforms = {}
+    for i in range(raw_bones):
+        offset = boneindex + i * 20
+        position = struct.unpack_from("<3f", data, offset)
+        # The stored value is a two-biased parent index; 0/1 means root.
+        raw_parent = struct.unpack_from("<i", data, offset + 12)[0]
+        parent = -1 if raw_parent <= 1 else raw_parent - 2
+        if not 0 <= parent < raw_bones:
+            parent = -1
+        bones.append(SmdBone(
+            bone_id=i, name=f"bone_{i}", parent_id=parent
+        ))
+        bind_transforms[i] = (position, (0.0, 0.0, 0.0))
+
+    clips = []
+    for i in range(numseq):
+        offset = seqindex + i * 40
+        name = _read_name(data[offset:offset + 32]) or f"seq_{i}"
+        numframes, flags = struct.unpack_from("<2i", data, offset + 32)
+        if not 0 < numframes <= 4096:
+            continue
+        frames = [
+            SmdFrame(time=frame, transforms=dict(bind_transforms))
+            for frame in range(numframes)
+        ]
+        clip = SmdModel(version=4, bones=list(bones), frames=frames)
+        clip.metadata.update({
+            "frame_rate": 30.0,
+            "duration": numframes / 30.0,
+            "name": name,
+            "looping": bool(flags & 0x1),
+            "v4_partial": True,
+        })
+        clips.append((name, clip))
+
+    model = SmdModel(version=4, bones=bones)
+    if clips:
+        model.frames = clips[0][1].frames
+        model.frame_names = {0: clips[0][0]}
+        model.metadata["animation_clips"] = clips
+        model.has_animation = any(len(clip.frames) > 1 for _name, clip in clips)
+    else:
+        model.frames = [SmdFrame(time=0, transforms=dict(bind_transforms))]
+
+    model.metadata["alpha_mdl"] = True
+    model.metadata["v4_partial"] = True
+    model.metadata["animation_error"] = (
+        "Alpha v4 MDL: skeleton and sequence names decoded. "
+        "Geometry, textures and animation tracks are not supported."
+    )
+    return model
 
 
 def _parse_alpha_mdl(data: bytes) -> SmdModel:
@@ -445,27 +623,41 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
 
     vertices = []
     triangles = []
-    materials = set()
+    bodygroups = []
     embedded_textures = {}
     texture_flags = {}
-
-    min_bound = [math.inf] * 3
-    max_bound = [-math.inf] * 3
 
     for bp_i in range(numbodyparts):
         bp_offset = bodypartindex + bp_i * 76
         if bp_offset + 76 > len(data):
             break
-        _raw_bp_name, nummodels, _base, modelindex = struct.unpack_from(
+        raw_bp_name, nummodels, _base, modelindex = struct.unpack_from(
             "<64s3i", data, bp_offset
         )
+        bp_name = _read_name(raw_bp_name) or f"bodypart_{bp_i}"
         nummodels = max(0, min(nummodels, 128))
-        if nummodels <= 0 or not 0 <= modelindex < len(data):
-            continue
+        options = []
 
         for m_i in range(nummodels):
+            vertex_start = len(vertices)
+            triangle_start = len(triangles)
             m_offset = modelindex + m_i * 112
+            option_name = (
+                _read_name(data[m_offset:m_offset + 64])
+                if 0 <= m_offset < len(data) else ""
+            ) or f"option_{m_i}"
+
+            def add_option():
+                options.append({
+                    "name": option_name,
+                    "vertex_start": vertex_start,
+                    "vertex_end": len(vertices),
+                    "triangle_start": triangle_start,
+                    "triangle_end": len(triangles),
+                })
+
             if m_offset + 112 > len(data):
+                add_option()
                 break
             fields = struct.unpack_from("<12i", data, m_offset + 64)
             nummesh = max(0, min(fields[3], 1024))
@@ -477,16 +669,22 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
             frameindex = fields[10]
 
             if nummesh <= 0 or numverts <= 0:
+                add_option()
                 continue
             if not 0 <= meshindex < len(data):
+                add_option()
                 continue
             if not 0 <= vertinfoindex < len(data):
+                add_option()
                 continue
             if not 0 <= norminfoindex < len(data):
+                add_option()
                 continue
             if vertinfoindex + numverts > len(data):
+                add_option()
                 continue
             if norminfoindex + numnorms > len(data):
+                add_option()
                 continue
 
             # Per-sequence frame headers (28 bytes each) hold the actual
@@ -515,6 +713,7 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
                         break
 
             if vertindex is None or normindex is None:
+                add_option()
                 continue
 
             vert_bones = data[vertinfoindex : vertinfoindex + numverts]
@@ -564,7 +763,6 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
                 tex_name, tex_flags, tex_w, tex_h, tex_pix = texture_entries[
                     texture_id
                 ]
-                materials.add(tex_name)
 
                 if tex_name not in embedded_textures and tex_w > 0 and tex_h > 0:
                     try:
@@ -616,9 +814,6 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
                             )
                         )
                         smd_indices.append(smd_idx)
-                        for axis in range(3):
-                            min_bound[axis] = min(min_bound[axis], position[axis])
-                            max_bound[axis] = max(max_bound[axis], position[axis])
 
                     if valid and len(smd_indices) == 3:
                         triangles.append(
@@ -628,16 +823,75 @@ def _parse_alpha_mdl(data: bytes) -> SmdModel:
                             )
                         )
 
-    model.vertices = vertices
-    model.triangles = triangles
+            add_option()
+
+        bodygroups.append({"name": bp_name, "options": options})
+
+    # The engine draws one option per bodypart. Compose the default (first
+    # variant with geometry) so stacked alpha submodels no longer overlap.
+    selections = []
+    model_vertices = []
+    model_triangles = []
+    materials = set()
+
+    for group in bodygroups:
+        group_options = group["options"]
+        if not group_options:
+            selections.append(0)
+            continue
+
+        choice = 0
+        for candidate_index, candidate in enumerate(group_options):
+            if candidate["triangle_end"] > candidate["triangle_start"]:
+                choice = candidate_index
+                break
+        selections.append(choice)
+
+        option = group_options[choice]
+        base = len(model_vertices)
+        model_vertices.extend(
+            vertices[option["vertex_start"]:option["vertex_end"]]
+        )
+        for triangle in triangles[option["triangle_start"]:option["triangle_end"]]:
+            i0, i1, i2 = triangle.indices
+            offset = base - option["vertex_start"]
+            model_triangles.append(
+                SmdTriangle(
+                    material=triangle.material,
+                    indices=(i0 + offset, i1 + offset, i2 + offset),
+                )
+            )
+            materials.add(triangle.material)
+
+    model.vertices = model_vertices
+    model.triangles = model_triangles
     model.materials = materials
+    model.metadata["bodygroups"] = [
+        {
+            "name": group["name"],
+            "options": [option["name"] for option in group["options"]],
+        }
+        for group in bodygroups
+    ]
+    model.metadata["bodygroup_geometry"] = bodygroups
+    model.metadata["bodygroup_selection"] = selections
+    model.metadata["bodygroup_pool"] = {
+        "vertices": vertices,
+        "triangles": triangles,
+    }
     model.uv_pre_flipped = False
     model.embedded_textures = embedded_textures
     model.metadata["texture_flags"] = texture_flags
     model.metadata["alpha_mdl"] = True
 
-    if triangles:
+    if model_triangles:
         model.has_geometry = True
+        min_bound = [math.inf] * 3
+        max_bound = [-math.inf] * 3
+        for vertex in model_vertices:
+            for axis in range(3):
+                min_bound[axis] = min(min_bound[axis], vertex.position[axis])
+                max_bound[axis] = max(max_bound[axis], vertex.position[axis])
         model.min_bound = tuple(min_bound)
         model.max_bound = tuple(max_bound)
 
@@ -697,6 +951,7 @@ def _retail_seq_descs(data: bytes, numseq: int, seqindex: int):
             (fps,) = struct.unpack_from("<f", data, entry + 32)
             (flags,) = struct.unpack_from("<i", data, entry + 36)
             (numframes,) = struct.unpack_from("<i", data, entry + 56)
+            linearmovement = struct.unpack_from("<3f", data, entry + 76)
             (numblends,) = struct.unpack_from("<i", data, entry + 120)
             (animindex,) = struct.unpack_from("<i", data, entry + 124)
             blend_type = struct.unpack_from("<2i", data, entry + 128)
@@ -715,6 +970,7 @@ def _retail_seq_descs(data: bytes, numseq: int, seqindex: int):
             "fps": fps if fps > 0.0 else 30.0,
             "flags": flags,
             "numframes": numframes,
+            "linearmovement": linearmovement,
             "numblends": max(1, numblends),
             "animindex": animindex,
             "blend_type": blend_type,
@@ -974,10 +1230,12 @@ def _retail_blend_clip(data, bones, bind_transforms, bone_scales, desc,
 
 
 def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
-                            numseq, seqindex, numseqgroups, seqgroupindex):
-    # Returns (clips, error). Clips follow the renderer's shared
-    # (name, SmdModel) convention. Every declared blend is exposed as
-    # an individual selectable clip for inspection.
+                            numseq, seqindex, numseqgroups, seqgroupindex,
+                            controllers=None):
+    # Returns (clips, error). One clip per sequence, following the
+    # renderer's (name, SmdModel) convention. Blended sequences carry
+    # every decoded blend as a cell in metadata["blend_cells"], the same
+    # shape retail Source sequences use for interpolated multi-blend clips.
     clips = []
     errors = []
     malformed_sequences = []
@@ -1039,9 +1297,10 @@ def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
             add_error(f"{desc['name']}: {reason}")
             continue
 
-        sequence_clips = []
+        cells = []
+        malformed_channels = 0
         for blend_index in range(desc["numblends"]):
-            clip, malformed_channels = _retail_blend_clip(
+            cell, malformed = _retail_blend_clip(
                 group_data,
                 bones,
                 bind_transforms,
@@ -1050,19 +1309,18 @@ def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
                 blend_index,
                 source_file,
             )
-            if clip is None:
-                sequence_clips = []
+            if cell is None:
+                cells = []
                 add_error(
                     f"{desc['name']}: blend {blend_index + 1} is truncated"
                 )
                 break
-            sequence_clips.append((desc["name"], clip))
-            if malformed_channels and desc["name"] not in malformed_sequences:
+            cells.append(cell)
+            malformed_channels += malformed
+            if malformed and desc["name"] not in malformed_sequences:
                 malformed_sequences.append(desc["name"])
 
-        if sequence_clips:
-            clips.extend(sequence_clips)
-        else:
+        if not cells:
             fallback = _retail_fallback_clip(
                 bones,
                 bind_transforms,
@@ -1071,6 +1329,50 @@ def _retail_animation_clips(mdl_path, data, bones, bind_transforms, bone_scales,
                 "animation record table is invalid",
             )
             clips.append((desc["name"], fallback))
+            continue
+
+        groupsize = _blend_groupsize(desc)
+        movements = _gold_movements(desc)
+        blend_cells = []
+        for blend_index, cell in enumerate(cells):
+            if movements:
+                cell.metadata["movements"] = movements
+            blend_cells.append({
+                "model": cell,
+                "x": blend_index % groupsize[0],
+                "y": blend_index // groupsize[0],
+                "index": blend_index,
+            })
+
+        primary = cells[0]
+        primary.metadata.update(
+            _retail_clip_metadata(
+                desc, 0, source_file, False,
+                malformed_channels=malformed_channels,
+            )
+        )
+        # The primary model stands for the whole sequence, not one cell.
+        # Individual cell models keep their own blend_index metadata.
+        primary.metadata["blend_count"] = 1
+        primary.metadata["groupsize"] = groupsize
+        primary.metadata["blend_cells"] = blend_cells
+        primary.metadata["sequence_blends"] = blend_cells
+        if groupsize[0] > 1 or groupsize[1] > 1:
+            names = []
+            starts = []
+            ends = []
+            for axis, size in enumerate(groupsize):
+                if size <= 1:
+                    continue
+                names.append(
+                    _blend_axis_label(desc["blend_type"][axis], axis, controllers)
+                )
+                starts.append(desc["blend_start"][axis])
+                ends.append(desc["blend_end"][axis])
+            primary.metadata["pose_param_names"] = tuple(names)
+            primary.metadata["paramstart"] = tuple(starts)
+            primary.metadata["paramend"] = tuple(ends)
+        clips.append((desc["name"], primary))
 
     if malformed_sequences:
         add_error(
@@ -1128,6 +1430,9 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
     if magic != b"IDST":
         raise ValueError("Not a GoldSrc MDL file")
 
+    if version == 4:
+        return _parse_v4_alpha_mdl(data)
+
     if _is_alpha_mdl(data, version):
         return _parse_alpha_mdl(data)
 
@@ -1153,6 +1458,9 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
         numtextures, textureindex, _ = struct.unpack_from("<3i", texture_data, 180)
 
     texture_entries = _load_textures(texture_data, numtextures, textureindex)
+    controllers = _parse_bone_controllers(
+        data, numbonecontrollers, bonecontrollerindex
+    )
 
     bones = []
     bind_transforms = {}
@@ -1465,6 +1773,7 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
     model.uv_pre_flipped = False
     model.embedded_textures = embedded_textures
     model.metadata["texture_flags"] = texture_flags
+    model.metadata["bone_controllers"] = list(controllers.values())
 
     if model_triangles:
         model.has_geometry = True
@@ -1488,6 +1797,7 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
             seqindex,
             numseqgroups,
             seqgroupindex,
+            controllers,
         )
         if clips:
             model.metadata["animation_clips"] = clips
@@ -1501,90 +1811,3 @@ def parse_hlmdl(mdl_path: str) -> SmdModel:
         model.metadata["animation_error"] = str(error)
 
     return model
-
-
-def compose_goldsrc_bodygroups(model, selections):
-    """Return a model whose geometry uses one variant per bodypart.
-
-    The parser keeps every variant in ``metadata["bodygroup_pool"]`` and
-    records the selected defaults in ``metadata["bodygroup_selection"]``.
-    Switching a selector only rebuilds the vertex and triangle lists, so
-    bones, frames, clips and embedded textures are shared with the source
-    model.
-    """
-    metadata = getattr(model, "metadata", None) or {}
-    groups = metadata.get("bodygroup_geometry")
-    pool = metadata.get("bodygroup_pool")
-    if not groups or not pool:
-        return model
-
-    pool_vertices = pool.get("vertices") or []
-    pool_triangles = pool.get("triangles") or []
-
-    selected = list(selections or [])
-    composed_vertices = []
-    composed_triangles = []
-    composed_materials = set()
-
-    for group_index, group in enumerate(groups):
-        options = group.get("options") or []
-        if not options:
-            continue
-
-        choice = selected[group_index] if group_index < len(selected) else 0
-        try:
-            choice = int(choice)
-        except (TypeError, ValueError):
-            choice = 0
-        choice = max(0, min(choice, len(options) - 1))
-        while len(selected) <= group_index:
-            selected.append(0)
-        selected[group_index] = choice
-
-        option = options[choice]
-        base = len(composed_vertices)
-        composed_vertices.extend(
-            pool_vertices[option["vertex_start"] : option["vertex_end"]]
-        )
-
-        for triangle in pool_triangles[
-            option["triangle_start"] : option["triangle_end"]
-        ]:
-            i0, i1, i2 = triangle.indices
-            offset = base - option["vertex_start"]
-            composed_triangles.append(
-                SmdTriangle(
-                    material=triangle.material,
-                    indices=(i0 + offset, i1 + offset, i2 + offset),
-                )
-            )
-            composed_materials.add(triangle.material)
-
-    composed = SmdModel(
-        version=model.version,
-        bones=model.bones,
-        frames=model.frames,
-    )
-    composed.vertex_targets = model.vertex_targets
-    composed.frame_names = model.frame_names
-    composed.has_animation = model.has_animation
-    composed.uv_pre_flipped = model.uv_pre_flipped
-    composed.embedded_textures = model.embedded_textures
-    composed.metadata = dict(metadata)
-    composed.metadata["bodygroup_selection"] = selected
-    composed.vertices = composed_vertices
-    composed.triangles = composed_triangles
-    composed.materials = composed_materials
-
-    if composed_triangles:
-        composed.has_geometry = True
-        min_bound = [math.inf, math.inf, math.inf]
-        max_bound = [-math.inf, -math.inf, -math.inf]
-        for vertex in composed_vertices:
-            for axis in range(3):
-                min_bound[axis] = min(min_bound[axis], vertex.position[axis])
-                max_bound[axis] = max(max_bound[axis], vertex.position[axis])
-        composed.min_bound = tuple(min_bound)
-        composed.max_bound = tuple(max_bound)
-
-    return composed

@@ -112,37 +112,40 @@ class Camera:
 
         self._update_clip()
 
-    def fit(self, min_bound, max_bound):
-        if not min_bound or not max_bound:
-            self.reset()
-            return
-
-        center = [
-            (min_bound[0] + max_bound[0]) * 0.5,
-            (min_bound[1] + max_bound[1]) * 0.5,
-            (min_bound[2] + max_bound[2]) * 0.5,
-        ]
-
+    def _fit_scale(self, min_bound, max_bound):
         size = [
             max_bound[0] - min_bound[0],
             max_bound[1] - min_bound[1],
             max_bound[2] - min_bound[2],
         ]
-
         radius = math.sqrt(size[0] * size[0] + size[1] * size[1] + size[2] * size[2]) * 0.5
-
         if radius < 0.0001:
             radius = 1.0
+        distance = (radius / math.tan(math.radians(self.fov) * 0.5)) * 1.35
+        return radius, distance
 
-        self.target = center
-        self.radius = radius
+    def fit(self, min_bound, max_bound):
+        if not min_bound or not max_bound:
+            self.reset()
+            return
 
-        fov_radians = math.radians(self.fov)
-        self.distance = (radius / math.tan(fov_radians * 0.5)) * 1.35
+        self.target = [
+            (min_bound[0] + max_bound[0]) * 0.5,
+            (min_bound[1] + max_bound[1]) * 0.5,
+            (min_bound[2] + max_bound[2]) * 0.5,
+        ]
+        self.radius, self.distance = self._fit_scale(min_bound, max_bound)
 
         self.yaw = math.radians(35.0)
         self.pitch = math.radians(20.0)
 
+        self._update_clip()
+
+    def refit(self, min_bound, max_bound):
+        """Re-fit zoom to new bounds, keeping target and orientation fixed."""
+        if not min_bound or not max_bound:
+            return
+        self.radius, self.distance = self._fit_scale(min_bound, max_bound)
         self._update_clip()
 
     def _update_clip(self):

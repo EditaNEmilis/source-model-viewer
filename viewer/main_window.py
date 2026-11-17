@@ -1193,6 +1193,12 @@ class MainWindow(QMainWindow):
 
         from viewer.smd_parser import compose_bodygroup_model
 
+        # A bodygroup swap rebuilds the rig but keeps the clip table. Snapshot
+        # the animation controls so the new pose starts from the same state.
+        blend_position = self.viewport.skeletal_blend_position()
+        root_motion = self.viewport.root_motion_enabled()
+        clip_index = self.clip_combo.currentIndex()
+
         self._bodygroup_selection = [
             max(0, int(value)) for value in selection
         ]
@@ -1204,6 +1210,14 @@ class MainWindow(QMainWindow):
             return
 
         self.viewport.set_model(composed, preserve_view=True)
+        self.viewport.set_skeletal_blend_position(*blend_position)
+        self.viewport.set_root_motion(root_motion)
+        if 0 <= clip_index < len(self._clip_models):
+            self.clip_combo.blockSignals(True)
+            self.clip_combo.setCurrentIndex(clip_index)
+            self.clip_combo.blockSignals(False)
+        self._update_pose_value_labels()
+        self.update_frame_label()
         self.viewport.update()
         self.update_model_info()
 

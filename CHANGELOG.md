@@ -134,6 +134,55 @@ Changelog of each versions.
 - Bodygroup swaps keep the current clip and frame, including on models whose
   skeleton is rebuilt for the new variant.
 
+### [0.9.5]
+
+#### Added
+- GoldSrc retail sequences with several blends now form one clip with blend
+  sliders instead of one identically named clip per blend. Axis names come
+  from the STUDIO_* motion type and the model's bone controller table, and
+  ranges come from the sequence's blend start/end values. Neighbouring blends
+  are interpolated by the existing multi-blend renderer path.
+- GoldSrc walk and run sequences feed `linearmovement` into the shared Root
+  Motion system, so the toggle in the View menu and Model settings moves the
+  model. HL1 alpha clips carry their linearmovement too.
+- GoldSrc bodygroup switches now explicitly preserve the blend slider
+  position, root motion setting and selected clip, in addition to the camera
+  and current frame.
+- HL1 alpha (v6) bodyparts are exposed through the Bodygroups dialog. The
+  parser records each variant's vertex and triangle range and draws one
+  option per bodypart, while clips and embedded textures stay shared when
+  switching.
+- HL1 alpha v4 files now open. Their bone hierarchy, bone positions, sequence
+  names, frame counts and loop flags are decoded into a bind-pose skeleton.
+  The status bar reports which parts of the file are still undecoded.
+- HL2 beta (v37) movement blocks are decoded. 1778 clips across the bundled
+  beta samples now carry displacement and turn angle for the shared Root
+  Motion toggle, including walk directions that point the right way.
+- Headless model checks report animation clip, bodygroup, blend cell and
+  root motion counts for compiled MDLs, and warn on inconsistent blend grids.
+
+#### Fixed
+- Removed an unused duplicate of the GoldSrc bodygroup composer. All formats
+  now use the single shared composition helper, which also pads empty
+  bodypart groups correctly.
+- Quake IDPO files now report that they are a different model format instead
+  of failing a Source MDL magic check.
+- Headless model checks no longer reject an MDL before the parser can give a
+  format-specific explanation.
+- Bodygroup variants with different bounds are now shifted so their center
+  lands on the existing grid center instead of drifting off-axis. The camera
+  re-fits its distance to the new bounds without changing the view angle.
+
+#### Notes
+- GoldSrc blend sliders have no textual pose parameter names in the file
+  format. Labels are derived from motion flags such as `X`, `YR` or `XR` and
+  the controller index where one matches.
+- GoldSrc root motion applies the sequence's single linearmovement vector
+  linearly over the clip. Engine auto-move driven by motiontype/motionbone is
+  not decoded.
+- Alpha v4 geometry, textures and animation tracks use an undocumented
+  layout. v4 samples show the skeleton and clip list but no mesh.
+
 ## [0.8.0] | Source 2 update
 
 ### Added
